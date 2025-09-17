@@ -132,6 +132,13 @@ public final class GGUF {
         }
         // The type of the tensor.
         GGMLType ggmlType = readGGMLType(fileChannel); // ggml_type type;
+        
+        // Debug tensor type for wcls
+        if (name.contains("output.weight") || name.contains("wcls")) {
+            System.err.printf("[GGUF-TENSOR-DEBUG] Tensor '%s' has ggmlType=%s (ordinal=%d)%n", 
+                            name, ggmlType, ggmlType.ordinal());
+        }
+        
         // The offset of the tensor's data in this file in bytes.
         // This offset is relative to `tensor_data`, not to the start
         // of the file, to make it easier for writers to write the file.

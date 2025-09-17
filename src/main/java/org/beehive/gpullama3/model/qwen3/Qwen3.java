@@ -32,6 +32,10 @@ public class Qwen3 extends AbstractModel {
 
     @Override
     public ModelType getModelType() {
+        // Return appropriate model type based on MoE configuration
+        if (configuration.isMoEModel()) {
+            return ModelType.QWEN3_30B_A3B;
+        }
         return ModelType.QWEN_3;
     }
 

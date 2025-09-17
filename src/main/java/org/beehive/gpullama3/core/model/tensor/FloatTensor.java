@@ -62,6 +62,11 @@ public abstract class FloatTensor {
         // The MemorySegment.get* methods should be used instead.
         return UNSAFE.getByte(memorySegment.address() + offset);
     }
+    
+    public static float readFloat(MemorySegment memorySegment, long offset) {
+        // The MemorySegment.get* methods should be used instead.
+        return UNSAFE.getFloat(memorySegment.address() + offset);
+    }
 
     // Preferred vector size for the fast multiplication routines.
     // (Apple Silicon) NEON only supports up-to 128bit vectors.
@@ -84,11 +89,34 @@ public abstract class FloatTensor {
     }
 
     static float scalarDot(FloatTensor thiz, int thisOffset, FloatTensor that, int thatOffset, int size) {
-        float result = 0f;
+        // REVERTED: Remove extreme value clamping that corrupts output classifier weights
+        // Use double precision accumulation but allow normal weight values through
+        double result = 0.0;
         for (int j = 0; j < size; j++) {
-            result += thiz.getFloat(thisOffset + j) * that.getFloat(thatOffset + j);
+            float thisVal = thiz.getFloat(thisOffset + j);
+            float thatVal = that.getFloat(thatOffset + j);
+            
+            // Only check for NaN/infinite values, don't clamp normal large weights
+            if (Float.isNaN(thisVal) || Float.isInfinite(thisVal)) thisVal = 0.0f;
+            if (Float.isNaN(thatVal) || Float.isInfinite(thatVal)) thatVal = 0.0f;
+            
+            // Accumulate using double precision
+            double product = (double)thisVal * (double)thatVal;
+            
+            // Only sanitize truly invalid results
+            if (Double.isNaN(product) || Double.isInfinite(product)) {
+                product = 0.0;
+            }
+            
+            result += product;
         }
-        return result;
+        
+        // Only protect against overflow to infinity, allow normal large results
+        if (Double.isNaN(result) || Double.isInfinite(result)) {
+            return 0.0f;
+        } else {
+            return (float)result;
+        }
     }
 
     public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {

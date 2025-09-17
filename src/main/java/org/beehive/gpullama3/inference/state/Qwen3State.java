@@ -5,6 +5,7 @@ import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import org.beehive.gpullama3.model.Configuration;
 import org.beehive.gpullama3.model.qwen3.Qwen3Configuration;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 import java.util.stream.Stream;
@@ -77,8 +78,11 @@ public final class Qwen3State extends State {
 
         fields.wrapKeyCache = new FloatArray(config.contextLength() * nEmbdGqa * config.numberOfLayers());
         fields.wrapValueCache = new FloatArray(config.contextLength() * nEmbdGqa * config.numberOfLayers());
-        fields.wrapValueCache.init(0.f);
-        fields.wrapKeyCache.init(0.f);
+        // BUGFIX: TornadoVM .init(0.f) calls removed to prevent GPU memory bounds violations
+        // Root cause: Training creates many Qwen3State instances → .init() triggers GPU memory allocation
+        // → MemorySegment access violations → training fallback. Arrays auto-initialize to 0.0f.
+        // fields.wrapValueCache.init(0.f);   // REMOVED - caused training failure  
+        // fields.wrapKeyCache.init(0.f);     // REMOVED - caused training failure
         fields.wrapAtt = new FloatArray(config.numberOfHeads() * config.contextLength());
         fields.positionHolder = new IntArray(1);
 

@@ -21,13 +21,37 @@ public class LlamaChatFormat implements ChatFormat {
     public LlamaChatFormat(LlamaTokenizer tokenizer) {
         this.tokenizer = tokenizer;
         Map<String, Integer> specialTokens = tokenizer.getSpecialTokens();
-        this.beginOfText = specialTokens.get("<|begin_of_text|>");
-        this.startHeader = specialTokens.get("<|start_header_id|>");
-        this.endHeader = specialTokens.get("<|end_header_id|>");
-        this.endOfTurn = specialTokens.get("<|eot_id|>");
-        this.endOfText = specialTokens.get("<|end_of_text|>");
+        
+        // Handle both Llama-2 and Llama-3 based models
+        // LLaVA-1.5-7B is based on Llama-2 and may not have Llama-3 specific tokens
+        System.out.println("DEBUG: Available special tokens: " + specialTokens.size());
+        specialTokens.forEach((key, value) -> System.out.println("  " + key + " = " + value));
+        
+        // Try Llama-3 tokens first, fallback to Llama-2 or safe defaults
+        this.beginOfText = specialTokens.getOrDefault("<|begin_of_text|>", 1); // BOS token
+        this.startHeader = specialTokens.getOrDefault("<|start_header_id|>", -1);
+        this.endHeader = specialTokens.getOrDefault("<|end_header_id|>", -1);  
+        this.endOfTurn = specialTokens.getOrDefault("<|eot_id|>", 2); // EOS token fallback
+        this.endOfText = specialTokens.getOrDefault("<|end_of_text|>", 2); // EOS token fallback
         this.endOfMessage = specialTokens.getOrDefault("<|eom_id|>", -1); // only in 3.1
-        this.stopTokens = Set.of(endOfText, endOfTurn);
+        
+        // Use available tokens for stop conditions - handle duplicates
+        if (this.endOfText != -1 && this.endOfTurn != -1 && this.endOfText != this.endOfTurn) {
+            this.stopTokens = Set.of(endOfText, endOfTurn);
+        } else if (this.endOfText != -1) {
+            this.stopTokens = Set.of(endOfText);
+        } else if (this.endOfTurn != -1) {
+            this.stopTokens = Set.of(endOfTurn);
+        } else {
+            // Fallback to standard EOS token
+            this.stopTokens = Set.of(2); // Standard EOS token ID
+        }
+        
+        System.out.println("DEBUG: Chat format initialized with tokens:");
+        System.out.println("  beginOfText: " + beginOfText);
+        System.out.println("  endOfText: " + endOfText);  
+        System.out.println("  endOfTurn: " + endOfTurn);
+        System.out.println("  stopTokens: " + stopTokens);
     }
 
     @Override

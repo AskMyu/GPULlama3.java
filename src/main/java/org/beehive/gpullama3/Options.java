@@ -5,7 +5,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 public record Options(Path modelPath, String prompt, String systemPrompt, String suffix, boolean interactive, float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo,
-                      boolean useTornadovm) {
+                      boolean useTornadovm, Path imagePath) {
 
     public static final int DEFAULT_MAX_TOKENS = 1024;
 
@@ -25,7 +25,17 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
     }
 
     private static boolean getDefaultTornadoVM() {
-        return Boolean.parseBoolean(System.getProperty("use.tornadovm", "true"));
+        // TornadoVM is enabled by default - only disabled when explicitly set to false
+        String property = System.getProperty("use.tornadovm");
+        boolean result;
+        if (property == null) {
+            result = true; // Default to TornadoVM when not specified
+            System.err.println("[TORNADOVM-DEBUG] use.tornadovm property not set, defaulting to TRUE");
+        } else {
+            result = Boolean.parseBoolean(property);
+            System.err.printf("[TORNADOVM-DEBUG] use.tornadovm property='%s', parsed to %b%n", property, result);
+        }
+        return result;
     }
 
     static void printUsage(PrintStream out) {
@@ -44,6 +54,8 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
         out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS);
         out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
         out.println("  --echo <boolean>              print ALL tokens to stderr, if true, recommended to set --stream=false, default false");
+        out.println("  --use-tornadovm <boolean>     use TornadoVM GPU acceleration, default true (set to false to disable)");
+        out.println("  --image <path>                path to input image file for multimodal inference (JPEG/PNG)");
         out.println();
     }
 
@@ -61,7 +73,7 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
         boolean echo = false;
         boolean useTornadoVM = getDefaultTornadoVM();
 
-        return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, seed, maxTokens, stream, echo, useTornadoVM);
+        return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, seed, maxTokens, stream, echo, useTornadoVM, null);
     }
 
     public static Options parseOptions(String[] args) {
@@ -77,6 +89,7 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
         boolean stream = false;
         boolean echo = false;
         Boolean useTornadovm = null; // null means not specified via command line
+        Path imagePath = null;
 
         for (int i = 0; i < args.length; i++) {
             String optionName = args[i];
@@ -111,6 +124,7 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
                         case "--stream" -> stream = Boolean.parseBoolean(nextArg);
                         case "--echo" -> echo = Boolean.parseBoolean(nextArg);
                         case "--use-tornadovm" -> useTornadovm = Boolean.parseBoolean(nextArg);
+                        case "--image" -> imagePath = Paths.get(nextArg);
                         default -> require(false, "Unknown option: %s", optionName);
                     }
                 }
@@ -123,6 +137,6 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
             useTornadovm = getDefaultTornadoVM();
         }
 
-        return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, seed, maxTokens, stream, echo, useTornadovm);
+        return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, seed, maxTokens, stream, echo, useTornadovm, imagePath);
     }
 }

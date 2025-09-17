@@ -2,7 +2,9 @@ package org.beehive.gpullama3.inference.state;
 
 import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import org.beehive.gpullama3.model.Configuration;
+import org.beehive.gpullama3.tornadovm.SmartCacheArray;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 /**
@@ -53,8 +55,8 @@ public abstract class State {
     public final FloatArray wrapK;          // FloatArray wrapper for the key tensor, optimized for TornadoVM.
     public final FloatArray wrapV;          // FloatArray wrapper for the value tensor, optimized for TornadoVM.
     public final FloatArray wrapAtt;        // FloatArray wrapper for the attention scores, optimized for TornadoVM.
-    public final FloatArray wrapKeyCache;   // FloatArray wrapper for the key cache, optimized for TornadoVM.
-    public final FloatArray wrapValueCache; // FloatArray wrapper for the value cache, optimized for TornadoVM.
+    public final Object wrapKeyCache;   // SmartCacheArray for >2GB support or FloatArray for small caches
+    public final Object wrapValueCache; // SmartCacheArray for >2GB support or FloatArray for small caches
     public final IntArray positionHolder;
 
     // store inter
@@ -98,7 +100,7 @@ public abstract class State {
         this.wrapK = fields.wrapK;
         this.wrapV = fields.wrapV;
 
-        // dim vs kvdim
+        // Cache arrays - FloatArray with intelligent allocation strategy
         this.wrapKeyCache = fields.wrapKeyCache;
         this.wrapValueCache = fields.wrapValueCache;
         this.wrapAtt = fields.wrapAtt;
@@ -118,7 +120,8 @@ public abstract class State {
         public FloatTensor x, xb, xb2, hb, hb2, q, k, v, att, logits;
         public FloatTensor[] keyCache, valueCache;
         public FloatArray wrapX, wrapXb, wrapXb2, wrapHb, wrapHb2, wrapLogits;
-        public FloatArray wrapQ, wrapK, wrapV, wrapAtt, wrapKeyCache, wrapValueCache;
+        public FloatArray wrapQ, wrapK, wrapV, wrapAtt;
+        public Object wrapKeyCache, wrapValueCache; // SmartCacheArray or FloatArray
         public IntArray positionHolder;
         public FloatArray temp, tempFFN, tempLogits;
     }

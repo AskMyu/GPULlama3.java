@@ -21,6 +21,7 @@ import org.beehive.gpullama3.tokenizer.impl.Tokenizer;
 import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
 import org.beehive.gpullama3.tornadovm.TornadoVMMasterPlan;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;

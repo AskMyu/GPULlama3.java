@@ -2,6 +2,7 @@ package org.beehive.gpullama3.inference.sampler;
 
 import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 /**
  * Generic interface for sampling tokens from probability distributions.

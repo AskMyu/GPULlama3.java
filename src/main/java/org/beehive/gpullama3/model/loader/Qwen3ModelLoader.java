@@ -21,6 +21,7 @@ import org.beehive.gpullama3.tokenizer.impl.Tokenizer;
 import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
 import org.beehive.gpullama3.tornadovm.TornadoVMMasterPlan;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -49,24 +50,54 @@ public class Qwen3ModelLoader extends ModelLoader {
                 contextLength = modelContextLength;
             }
 
-            Qwen3Configuration config = new Qwen3Configuration(
-                    (int) metadata.get("qwen3.embedding_length"),
-                    (int) metadata.get("qwen3.feed_forward_length"),
-                    (int) metadata.get("qwen3.block_count"),
-                    (int) metadata.get("qwen3.attention.head_count"),
-
-                    metadata.containsKey("qwen3.attention.head_count_kv")
-                            ? (int) metadata.get("qwen3.attention.head_count_kv")
-                            : (int) metadata.get("qwen3.attention.head_count"),
-                    (int) metadata.get("qwen3.attention.key_length"),
-                    (int) metadata.get("qwen3.attention.value_length"),
-
-                    vocabulary.size(),
-                    modelContextLength, contextLength,
-                    false,
-                    (float) metadata.get("qwen3.attention.layer_norm_rms_epsilon"),
-                    (float) metadata.get("qwen3.rope.freq_base")
-            );
+            // Check if this is a MoE model (Qwen3-30B-A3B has expert configuration)
+            boolean isMoEModel = metadata.containsKey("qwen3.expert_count") || 
+                               metadata.containsKey("qwen3.expert.count") ||
+                               isQwen3MoEModel(metadata);
+            
+            Qwen3Configuration config;
+            if (isMoEModel) {
+                // MoE configuration for Qwen3-30B-A3B
+                int numberOfExperts = getExpertCount(metadata);
+                int numberOfActiveExperts = getActiveExpertCount(metadata);
+                
+                config = Qwen3Configuration.createMoE(
+                        (int) metadata.get("qwen3.embedding_length"),
+                        (int) metadata.get("qwen3.feed_forward_length"),
+                        (int) metadata.get("qwen3.block_count"),
+                        (int) metadata.get("qwen3.attention.head_count"),
+                        metadata.containsKey("qwen3.attention.head_count_kv")
+                                ? (int) metadata.get("qwen3.attention.head_count_kv")
+                                : (int) metadata.get("qwen3.attention.head_count"),
+                        (int) metadata.get("qwen3.attention.key_length"),
+                        (int) metadata.get("qwen3.attention.value_length"),
+                        vocabulary.size(),
+                        modelContextLength, contextLength,
+                        false,
+                        (float) metadata.get("qwen3.attention.layer_norm_rms_epsilon"),
+                        (float) metadata.get("qwen3.rope.freq_base"),
+                        numberOfExperts,
+                        numberOfActiveExperts
+                );
+            } else {
+                // Dense configuration (backward compatibility)
+                config = Qwen3Configuration.createDense(
+                        (int) metadata.get("qwen3.embedding_length"),
+                        (int) metadata.get("qwen3.feed_forward_length"),
+                        (int) metadata.get("qwen3.block_count"),
+                        (int) metadata.get("qwen3.attention.head_count"),
+                        metadata.containsKey("qwen3.attention.head_count_kv")
+                                ? (int) metadata.get("qwen3.attention.head_count_kv")
+                                : (int) metadata.get("qwen3.attention.head_count"),
+                        (int) metadata.get("qwen3.attention.key_length"),
+                        (int) metadata.get("qwen3.attention.value_length"),
+                        vocabulary.size(),
+                        modelContextLength, contextLength,
+                        false,
+                        (float) metadata.get("qwen3.attention.layer_norm_rms_epsilon"),
+                        (float) metadata.get("qwen3.rope.freq_base")
+                );
+            }
 
             Weights weights = null;
             if (loadWeights) {
@@ -172,4 +203,70 @@ public class Qwen3ModelLoader extends ModelLoader {
         );
     }
     // @formatter:on
+    
+    /**
+     * Checks if this is a Qwen3 MoE model by examining model metadata
+     */
+    private boolean isQwen3MoEModel(Map<String, Object> metadata) {
+        String modelName = (String) metadata.get("general.name");
+        String architecture = (String) metadata.get("general.architecture");
+        
+        // Check for Qwen3-30B-A3B patterns
+        if (modelName != null) {
+            String lowerName = modelName.toLowerCase();
+            if (lowerName.contains("qwen3-30b-a3b") || 
+                lowerName.contains("qwen3 30b a3b") ||
+                lowerName.contains("30b-a3b")) {
+                return true;
+            }
+        }
+        
+        // Check architecture
+        if ("qwen3".equals(architecture)) {
+            // Check for MoE-specific parameters or tensor patterns
+            return metadata.containsKey("qwen3.expert_count") ||
+                   metadata.containsKey("qwen3.expert.count") ||
+                   metadata.containsKey("qwen3.moe.num_experts");
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Gets the number of experts from model metadata
+     */
+    private int getExpertCount(Map<String, Object> metadata) {
+        // Try different possible keys for expert count
+        if (metadata.containsKey("qwen3.expert_count")) {
+            return (int) metadata.get("qwen3.expert_count");
+        }
+        if (metadata.containsKey("qwen3.expert.count")) {
+            return (int) metadata.get("qwen3.expert.count");
+        }
+        if (metadata.containsKey("qwen3.moe.num_experts")) {
+            return (int) metadata.get("qwen3.moe.num_experts");
+        }
+        
+        // Default for Qwen3-30B-A3B
+        return 128;
+    }
+    
+    /**
+     * Gets the number of active experts per token from model metadata
+     */
+    private int getActiveExpertCount(Map<String, Object> metadata) {
+        // Try different possible keys for active expert count
+        if (metadata.containsKey("qwen3.expert_used_count")) {
+            return (int) metadata.get("qwen3.expert_used_count");
+        }
+        if (metadata.containsKey("qwen3.expert.used_count")) {
+            return (int) metadata.get("qwen3.expert.used_count");
+        }
+        if (metadata.containsKey("qwen3.moe.num_experts_per_tok")) {
+            return (int) metadata.get("qwen3.moe.num_experts_per_tok");
+        }
+        
+        // Default for Qwen3-30B-A3B (Top-8 routing)
+        return 8;
+    }
 }

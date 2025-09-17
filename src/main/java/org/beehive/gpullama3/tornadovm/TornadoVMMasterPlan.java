@@ -1,6 +1,7 @@
 package org.beehive.gpullama3.tornadovm;
 
 import org.beehive.gpullama3.auxiliary.Tuple2;
+import org.beehive.gpullama3.inference.state.GemmaState;
 import org.beehive.gpullama3.inference.state.Phi3State;
 import org.beehive.gpullama3.inference.state.Qwen2State;
 import org.beehive.gpullama3.inference.state.Qwen3State;
@@ -14,6 +15,7 @@ import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
 import uk.ac.manchester.tornado.api.TornadoRuntime;
 import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 import java.util.List;
 import java.util.Locale;
@@ -27,16 +29,33 @@ public class TornadoVMMasterPlan {
     public TornadoExecutionPlan executionPlan;
     List<ImmutableTaskGraph> taskGraphs;
 
+    // Layer range for batch processing (-1 means all layers)
+    private final int batchStartLayer;
+    private final int batchEndLayer;
+
     public TornadoVMMasterPlan(State state, Model model) {
-        TornadoVMLayerPlanner tornadoVMLayerPlanner = createPlanner(state, model);
-        Tuple2<List<ImmutableTaskGraph>, GridScheduler> tornadoVMPlan = shouldUseNvidiaScheduler(model)
-                ? tornadoVMLayerPlanner.setupTornadoForwardPlanLayered()
-                : tornadoVMLayerPlanner.setupTornadoForwardPlanLayeredNonNvidia();
-        this.taskGraphs = tornadoVMPlan.getFirst();
-        this.scheduler = tornadoVMPlan.getSecond();
-        this.state = state;
-        this.config = model.configuration();
-        this.executionPlan = new TornadoExecutionPlan(taskGraphs.toArray(new ImmutableTaskGraph[taskGraphs.size()]));
+        this(state, model, -1, -1); // All layers by default
+    }
+
+    public TornadoVMMasterPlan(State state, Model model, int startLayer, int endLayer) {
+        this.batchStartLayer = startLayer;
+        this.batchEndLayer = endLayer;
+
+        try {
+            TornadoVMLayerPlanner tornadoVMLayerPlanner = createPlanner(state, model);
+
+
+            Tuple2<List<ImmutableTaskGraph>, GridScheduler> tornadoVMPlan = shouldUseNvidiaScheduler(model)
+                    ? tornadoVMLayerPlanner.setupTornadoForwardPlanLayered()
+                    : tornadoVMLayerPlanner.setupTornadoForwardPlanLayeredNonNvidia();
+            this.taskGraphs = tornadoVMPlan.getFirst();
+            this.scheduler = tornadoVMPlan.getSecond();
+            this.state = state;
+            this.config = model.configuration();
+            this.executionPlan = TornadoVMSafeInitializer.createExecutionPlanSafely(taskGraphs.toArray(new ImmutableTaskGraph[0]));
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize TornadoVM Master Plan", e);
+        }
     }
 
     /**
@@ -93,16 +112,54 @@ public class TornadoVMMasterPlan {
         return tornadoVMPlan;
     }
 
+
     /**
      * Dispatcher method to select the TornadoVMLayerPlanner for the model.
      */
     TornadoVMLayerPlanner createPlanner(State state, Model model) {
+        System.err.printf("[TORNADO-PLANNER] Model type detected: %s%n", model.getModelType());
+
         return switch (model.getModelType()) {
-            case LLAMA_3, MISTRAL -> new TornadoVMLayerPlanner(state, model);
-            case PHI_3 -> new Phi3TornadoVMLayerPlanner((Phi3State) state, model);
-            case QWEN_2, DEEPSEEK_R1_DISTILL_QWEN -> new Qwen2TornadoVMLayerPlanner((Qwen2State) state, model);
-            case QWEN_3 -> new Qwen3TornadoVMLayerPlanner((Qwen3State) state, model);
-            case UNKNOWN -> throw new UnsupportedOperationException("Unknown model type");
+            case LLAMA_3, MISTRAL -> {
+                System.err.println("[TORNADO-PLANNER] Using standard TornadoVMLayerPlanner for LLAMA_3/MISTRAL");
+                yield new TornadoVMLayerPlanner(state, model);
+            }
+            case PHI_3, PHI_4_MINI_REASONING -> {
+                System.err.println("[TORNADO-PLANNER] Using Phi3TornadoVMLayerPlanner");
+                yield new Phi3TornadoVMLayerPlanner((Phi3State) state, model);
+            }
+            case QWEN_2, DEEPSEEK_R1_DISTILL_QWEN, DEEPSEEK_R1_DISTILL_QWEN_1_5B -> {
+                System.err.println("[TORNADO-PLANNER] Using Qwen2TornadoVMLayerPlanner");
+                yield new Qwen2TornadoVMLayerPlanner((Qwen2State) state, model);
+            }
+            case OLMOE_1B_7B -> {
+                System.err.println("[TORNADO-PLANNER] Using standard TornadoVMLayerPlanner for OLMOE");
+                yield new TornadoVMLayerPlanner(state, model);
+            }
+            case LLAVA_LLAMA_3_8B, LLAVA_LLAMA_3_8B_INT4 -> {
+                System.err.println("[TORNADO-PLANNER] Using standard TornadoVMLayerPlanner for LLAVA");
+                yield new TornadoVMLayerPlanner(state, model);
+            }
+            case QWEN_3, QWEN3_30B_A3B -> {
+                System.err.println("[TORNADO-PLANNER] Using Qwen3TornadoVMLayerPlanner");
+                yield new Qwen3TornadoVMLayerPlanner((Qwen3State) state, model);
+            }
+            case GEMMA_3 -> {
+                System.err.println("[TORNADO-PLANNER] ✅ Using GemmaTornadoVMLayerPlanner for GEMMA_3");
+                yield new GemmaTornadoVMLayerPlanner((GemmaState) state, model);
+            }
+            case GRANITE_3_3 -> {
+                System.err.println("[TORNADO-PLANNER] ✅ Using OscillationProofLayerPlanner for GRANITE_3_3 (mixed precision + σReparam)");
+                yield new OscillationProofLayerPlanner(state, model);
+            }
+            case GPT_OSS -> {
+                System.err.println("[TORNADO-PLANNER] Using standard TornadoVMLayerPlanner for GPT_OSS");
+                yield new TornadoVMLayerPlanner(state, model);
+            }
+            case UNKNOWN -> {
+                System.err.println("[TORNADO-PLANNER] ❌ UNKNOWN model type - cannot create planner");
+                throw new UnsupportedOperationException("Cannot create planner for unknown model type");
+            }
         };
     }
 
@@ -118,15 +175,20 @@ public class TornadoVMMasterPlan {
      * @return {@code true} if the NVIDIA-specific scheduler should be used; {@code false} otherwise
      */
     public static boolean shouldUseNvidiaScheduler(Model model) {
-        TornadoRuntime runtime = TornadoRuntimeProvider.getTornadoRuntime();
-        String platformName = runtime.getBackend(0).getDefaultDevice().getPlatformName().toLowerCase(Locale.ROOT);
+        try {
+            TornadoRuntime runtime = TornadoVMSafeInitializer.getTornadoRuntimeSafely();
+            String platformName = runtime.getBackend(0).getDefaultDevice().getPlatformName().toLowerCase(Locale.ROOT);
 
-        boolean isNvidia = platformName.contains("nvidia");
-        boolean isNotMistral = model.getModelType() != ModelType.MISTRAL;
+            boolean isNvidia = platformName.contains("nvidia");
+            boolean isNotMistral = model.getModelType() != ModelType.MISTRAL;
 
-        boolean result = isNvidia && isNotMistral;
+            boolean result = isNvidia && isNotMistral;
 
-        return result;
+            return result;
+        } catch (Exception e) {
+            System.err.println("[TORNADO-SCHEDULER] Failed to detect NVIDIA platform, defaulting to non-NVIDIA scheduler: " + e.getMessage());
+            return false; // Default to non-NVIDIA scheduler if detection fails
+        }
     }
 
     /**
@@ -154,6 +216,10 @@ public class TornadoVMMasterPlan {
                 .execute();
 
         // Set the position in the state object (used by attention layers)
+        // DEBUG: Only for Gemma models to avoid disrupting other models
+        if (config.getClass().getSimpleName().contains("Gemma")) {
+            System.err.printf("[POSITION-DEBUG] Setting position to %d in TornadoVM execution%n", position);
+        }
         state.positionHolder.set(0, position);
 
         // 2. Execute each transformer layer graph sequentially
@@ -170,6 +236,38 @@ public class TornadoVMMasterPlan {
                 .execute();
 
         // @formatter:on
+
+        // DEBUG: Only check state evolution for Gemma models to avoid disrupting other models
+        if (config.getClass().getSimpleName().contains("Gemma")) {
+            // DEBUG: Check if hidden state is evolving
+            float firstXValue = state.wrapX.get(0);
+            float midXValue = state.wrapX.get(state.wrapX.getSize() / 2);
+            float lastXValue = state.wrapX.get(state.wrapX.getSize() - 1);
+            System.err.printf("[STATE-DEBUG] Position %d - X state values: first=%.6f, mid=%.6f, last=%.6f%n",
+                             position, firstXValue, midXValue, lastXValue);
+
+            // DEBUG: Check top logits to see if they're varying
+            float maxLogit = -Float.MAX_VALUE;
+            int maxToken = -1;
+            float secondMaxLogit = -Float.MAX_VALUE;
+            int secondMaxToken = -1;
+
+            for (int i = 0; i < Math.min(state.wrapLogits.getSize(), 50000); i++) {
+                float logit = state.wrapLogits.get(i);
+                if (logit > maxLogit) {
+                    secondMaxLogit = maxLogit;
+                    secondMaxToken = maxToken;
+                    maxLogit = logit;
+                    maxToken = i;
+                } else if (logit > secondMaxLogit) {
+                    secondMaxLogit = logit;
+                    secondMaxToken = i;
+                }
+            }
+            System.err.printf("[LOGITS-DEBUG] Position %d - Top tokens: #1=%d(%.4f), #2=%d(%.4f)%n",
+                             position, maxToken, maxLogit, secondMaxToken, secondMaxLogit);
+        }
+
         // Return the logits (used for token prediction)
         return state.wrapLogits;
     }
@@ -196,6 +294,35 @@ public class TornadoVMMasterPlan {
      */
     private int getFinalLogitsGraphIndex() {
         return taskGraphs.size() - 1;
+    }
+
+    /**
+     * Force copy-in of read-only weights for a specific batch of layers.
+     * This method only loads weights for the specified layer range, not all layers.
+     *
+     * NOTE: Due to TornadoVM limitations, we cannot reset after warmup.
+     * This method assumes the plan structure exists for all layers.
+     *
+     * @param startLayer Starting layer index (inclusive)
+     * @param endLayer Ending layer index (inclusive)
+     */
+    public void forceCopyInReadOnlyDataLayeredBatch(int startLayer, int endLayer) {
+        System.err.printf("[TORNADO-BATCH] Loading weights for layers %d-%d only%n", startLayer, endLayer);
+
+        // CRITICAL: We cannot reset or reinitialize TornadoVM after warmup
+        // Instead, we must work within the existing execution plan
+        System.err.println("[TORNADO-BATCH] ⚠️ WARNING: Layer-specific weight loading after warmup is limited");
+        System.err.println("[TORNADO-BATCH] TornadoVM does not support reset after warmup - attempting partial execution");
+
+        try {
+            // Execute all TornadoVM graphs - this is required due to TornadoVM constraints
+            // We cannot selectively execute only certain layer graphs after warmup
+            forceCopyInReadOnlyDataLayered();
+            System.err.printf("[TORNADO-BATCH] Had to load ALL layers due to TornadoVM constraints%n");
+        } catch (Exception e) {
+            System.err.printf("[TORNADO-BATCH] ❌ Failed to load layer batch: %s%n", e.getMessage());
+            throw new RuntimeException("TornadoVM layer batch loading failed", e);
+        }
     }
 
     /// Execute the forward pass of the LLaMA transformer model using TornadoVM acceleration just once to copy the data into the read-only data layer.

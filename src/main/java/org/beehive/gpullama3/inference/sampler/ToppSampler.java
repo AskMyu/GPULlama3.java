@@ -2,6 +2,7 @@ package org.beehive.gpullama3.inference.sampler;
 
 import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 import java.util.Comparator;
 import java.util.random.RandomGenerator;
@@ -15,11 +16,13 @@ public final class ToppSampler implements Sampler {
     final int[] indices;
     final float topp;
     final RandomGenerator rng;
+    final int vocabularySize;
 
     public ToppSampler(int maxNumberOfElements, float topp, RandomGenerator rng) {
         this.indices = new int[maxNumberOfElements];
         this.topp = topp;
         this.rng = rng;
+        this.vocabularySize = maxNumberOfElements;
     }
 
     static void swap(int[] array, int from, int to) {
@@ -68,7 +71,8 @@ public final class ToppSampler implements Sampler {
         // values smaller than (1 - topp) / (n - 1) cannot be part of the result
         // so for efficiency we crop these out as candidates before sorting
         float cutoff = (1.0f - topp) / (n - 1);
-        for (int i = 0; i < indices.length; i++) {
+        // CRITICAL FIX: Use actual tensor size instead of indices.length to prevent bounds exception
+        for (int i = 0; i < n; i++) {
             if (logits.getFloat(i) >= cutoff) {
                 indices[head++] = i;
             } else {
@@ -92,7 +96,8 @@ public final class ToppSampler implements Sampler {
         // values smaller than (1 - topp) / (n - 1) cannot be part of the result
         // so for efficiency we crop these out as candidates before sorting
         float cutoff = (1.0f - topp) / (n - 1);
-        for (int i = 0; i < indices.length; i++) {
+        // CRITICAL FIX: Use actual array size instead of indices.length to prevent bounds exception
+        for (int i = 0; i < n; i++) {
             if (logits.get(i) >= cutoff) {
                 indices[head++] = i;
             } else {
@@ -108,6 +113,8 @@ public final class ToppSampler implements Sampler {
      * Uses a type-specific value getter function to access tensor values.
      */
     private int processTopP(Object logits, Comparator<Integer> comparator, int n0) {
+        // CRITICAL FIX: Ensure all vocab bounds checking
+        final int VOCAB_SIZE = vocabularySize;
         // build heap O(n0)
         for (int i = n0 / 2 - 1; i >= 0; --i) {
             siftDown(indices, i, n0, comparator);
@@ -148,10 +155,38 @@ public final class ToppSampler implements Sampler {
 
             cdf += value;
             if (r < cdf) {
-                return indices[i];
+                int token = indices[i];
+                // CRITICAL FIX: Ensure token is within vocabulary bounds
+                if (token < VOCAB_SIZE) {
+                    return token;
+                }
+                // If invalid token, continue to find a valid one
             }
         }
 
-        return indices[lastIndex]; // in case of rounding errors
+        // CRITICAL FIX: Don't return potentially invalid tokens
+        // Find valid token with highest probability in case of rounding errors
+        int bestToken = -1;
+        float bestProb = -1.0f;
+        
+        for (int i = n0 - 1; i >= lastIndex; i--) {
+            int token = indices[i];
+            if (token < VOCAB_SIZE) { // Only consider valid tokens
+                float value;
+                if (logits instanceof FloatTensor) {
+                    value = ((FloatTensor) logits).getFloat(token);
+                } else {
+                    value = ((FloatArray) logits).get(token);
+                }
+                
+                if (bestToken == -1 || value > bestProb) {
+                    bestToken = token;
+                    bestProb = value;
+                }
+            }
+        }
+        
+        // If no valid token found, use safe fallback (space token or 0)
+        return bestToken != -1 ? bestToken : 0;
     }
 }

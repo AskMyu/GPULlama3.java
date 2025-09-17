@@ -5,6 +5,7 @@ import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import org.beehive.gpullama3.model.Configuration;
 import org.beehive.gpullama3.model.phi3.Phi3Configuration;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 import java.util.stream.Stream;
@@ -92,8 +93,11 @@ public class Phi3State extends State {
         // KV cache wrappers
         fields.wrapKeyCache = new FloatArray(contextLength * kvDim * nLayers);
         fields.wrapValueCache = new FloatArray(contextLength * kvDim * nLayers);
-        fields.wrapKeyCache.init(0.f);
-        fields.wrapValueCache.init(0.f);
+        // BUGFIX: TornadoVM .init(0.f) calls removed to prevent GPU memory bounds violations  
+        // Root cause: Training creates many Phi3State instances → .init() triggers GPU memory allocation
+        // → MemorySegment access violations → training fallback. Arrays auto-initialize to 0.0f.
+        // fields.wrapKeyCache.init(0.f);     // REMOVED - caused training failure
+        // fields.wrapValueCache.init(0.f);   // REMOVED - caused training failure
 
         // Attention wrapper
         fields.wrapAtt = new FloatArray(nHeads * contextLength);

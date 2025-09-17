@@ -9,6 +9,9 @@ import org.beehive.gpullama3.core.model.tensor.F32FloatTensor;
 import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import org.beehive.gpullama3.core.model.tensor.GGMLTensorEntry;
 import org.beehive.gpullama3.core.model.tensor.Q4_0FloatTensor;
+import org.beehive.gpullama3.core.model.tensor.Q4_KFloatTensor;
+import org.beehive.gpullama3.core.model.tensor.Q6_KFloatTensor;
+import org.beehive.gpullama3.core.model.tensor.Q8_KFloatTensor;
 import org.beehive.gpullama3.core.model.tensor.Q8_0FloatTensor;
 import org.beehive.gpullama3.core.types.Pair;
 import org.beehive.gpullama3.inference.operation.RoPE;
@@ -22,6 +25,7 @@ import org.beehive.gpullama3.tornadovm.TornadoVMMasterPlan;
 import uk.ac.manchester.tornado.api.types.HalfFloat;
 import uk.ac.manchester.tornado.api.types.arrays.ByteArray;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 
 import java.io.IOException;
@@ -40,6 +44,7 @@ public abstract class ModelLoader {
     protected int contextLength;
     protected boolean loadWeights;
     protected boolean useTornadovm;
+    protected String modelPath;
 
     public ModelLoader(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
         this.fileChannel = fileChannel;
@@ -47,30 +52,182 @@ public abstract class ModelLoader {
         this.contextLength = contextLength;
         this.loadWeights = loadWeights;
         this.useTornadovm = useTornadovm;
+        this.modelPath = null;
     }
 
-    private static ModelType detectModelType(Map<String, Object> metadata) {
+    public ModelLoader(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, String modelPath) {
+        this.fileChannel = fileChannel;
+        this.gguf = gguf;
+        this.contextLength = contextLength;
+        this.loadWeights = loadWeights;
+        this.useTornadovm = true; // Default to TornadoVM for VLM models
+        this.modelPath = modelPath;
+    }
+
+    public ModelLoader(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm, String modelPath) {
+        this.fileChannel = fileChannel;
+        this.gguf = gguf;
+        this.contextLength = contextLength;
+        this.loadWeights = loadWeights;
+        this.useTornadovm = useTornadovm;
+        this.modelPath = modelPath;
+    }
+
+    private static ModelType detectModelType(Map<String, Object> metadata, Path ggufPath) {
         String name = (String) metadata.get("general.name");
+        String architecture = (String) metadata.get("general.architecture");
         String tokenizerModel = (String) metadata.get("tokenizer.ggml.model");
         Integer vocabSize = (Integer) metadata.get("llama.vocab_size");
+        String filename = ggufPath.getFileName().toString().toLowerCase();
+        String fullPath = ggufPath.toString().toLowerCase();
 
-        // Check by name first
+
+        // Check by architecture first (more reliable)
+        if (architecture != null) {
+            String lowerArch = architecture.toLowerCase();
+            System.err.printf("[MODEL-LOADER] Architecture detected: '%s'%n", architecture);
+            if (lowerArch.equals("gemma") || lowerArch.equals("gemma2") || lowerArch.equals("gemma3")) {
+                System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA architecture: %s -> GEMMA_3%n", architecture);
+                return ModelType.GEMMA_3;
+            } else if (lowerArch.equals("gptoss") || lowerArch.equals("gpt-oss")) {
+                return ModelType.GPT_OSS;
+            } else if (lowerArch.equals("granite")) {
+                return ModelType.GRANITE_3_3;
+            } else if (lowerArch.equals("phi4") || lowerArch.equals("phi-4")) {
+                return ModelType.PHI_4_MINI_REASONING;
+            } else if (lowerArch.equals("olmoe") || lowerArch.equals("olmo")) {
+                return ModelType.OLMOE_1B_7B;
+            }
+        }
+
+        // Check filename and path for LLaVA models (since they often don't identify as LLaVA in metadata)
+        if ((filename != null && (filename.contains("llava") || filename.contains("llava-llama") || filename.contains("llava-v"))) ||
+            (fullPath != null && (fullPath.contains("llava") || fullPath.contains("llava-phi") || fullPath.contains("llava-llama")))) {
+            if (filename.contains("v1.5") || filename.contains("1.5") || filename.contains("v1_5")) {
+                // LLaVA-1.5 variant - use Llama3-8B type for compatibility
+                return ModelType.LLAVA_LLAMA_3_8B_INT4; // LLaVA-1.5-7B with Q4 quantization
+            } else if (fullPath.contains("llava-phi") || filename.contains("phi")) {
+                // LLaVA-Phi variant - use Llama3-8B type for compatibility since it's multimodal
+                if (filename.contains("int4") || filename.contains("q4") || filename.contains("4_k")) {
+                    return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                }
+                return ModelType.LLAVA_LLAMA_3_8B;
+            } else if (filename.contains("llama-3") || filename.contains("llama3")) {
+                // LLaVA-Llama3 variant
+                if (filename.contains("int4") || filename.contains("q4") || filename.contains("4_k")) {
+                    return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                }
+                return ModelType.LLAVA_LLAMA_3_8B;
+            } else {
+                // Generic LLaVA - assume Llama3 variant
+                if (filename.contains("int4") || filename.contains("q4") || filename.contains("4_k")) {
+                    return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                }
+                return ModelType.LLAVA_LLAMA_3_8B;
+            }
+        }
+
+        // Check by name as fallback
         if (name != null) {
             String lowerName = name.toLowerCase();
-            if (lowerName.contains("mistral")) {
+            System.err.printf("[MODEL-LOADER] Model name: '%s'%n", name);
+            if (lowerName.contains("gemma-2") || lowerName.contains("gemma2") || lowerName.contains("gemma-3") || lowerName.contains("gemma3")) {
+                System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA by name: %s -> GEMMA_3%n", name);
+                return ModelType.GEMMA_3;
+            } else if (lowerName.contains("gpt-oss") || lowerName.contains("gptoss")) {
+                return ModelType.GPT_OSS;
+            } else if (lowerName.contains("granite-3") || lowerName.contains("granite3") || lowerName.contains("granite")) {
+                return ModelType.GRANITE_3_3;
+            } else if (lowerName.contains("deepseek-r1-distill-qwen-1.5b") || 
+                       lowerName.contains("deepseek r1 distill qwen 1.5b")) {
+                return ModelType.DEEPSEEK_R1_DISTILL_QWEN_1_5B;
+            } else if (lowerName.contains("deepseek r1 distill") || 
+                       lowerName.contains("deepseek-r1-distill")) {
+                return ModelType.DEEPSEEK_R1_DISTILL_QWEN;
+            } else if (lowerName.contains("olmoe-1b-7b") || 
+                       lowerName.contains("olmoe 1b 7b")) {
+                return ModelType.OLMOE_1B_7B;
+            } else if (lowerName.contains("phi-4-mini-reasoning") || 
+                       lowerName.contains("phi4-mini-reasoning") ||
+                       lowerName.contains("phi-4 mini reasoning")) {
+                return ModelType.PHI_3; // Use PHI_3 since architecture is phi3
+            } else if (lowerName.contains("qwen3-30b-a3b") || 
+                       lowerName.contains("qwen3 30b a3b")) {
+                return ModelType.QWEN3_30B_A3B;
+            } else if (lowerName.contains("mistral")) {
                 return ModelType.MISTRAL;
+            } else if (lowerName.contains("llava") || lowerName.contains("llava-llama") || lowerName.contains("llava-v")) {
+                // Detect LLaVA model variant by name - MUST come before generic "llama" check
+                if (lowerName.contains("v1.5") || lowerName.contains("1.5") || lowerName.contains("v1_5")) {
+                    // LLaVA-1.5 variant - use Llama3-8B type for compatibility
+                    return ModelType.LLAVA_LLAMA_3_8B_INT4; // LLaVA-1.5-7B with Q4 quantization
+                } else if (lowerName.contains("llama-3") || lowerName.contains("llama3")) {
+                    // LLaVA-Llama3 variant
+                    if (lowerName.contains("int4") || lowerName.contains("q4") || lowerName.contains("4_k")) {
+                        return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                    }
+                    return ModelType.LLAVA_LLAMA_3_8B;
+                } else {
+                    // Generic LLaVA - assume Llama3 variant
+                    if (lowerName.contains("int4") || lowerName.contains("q4") || lowerName.contains("4_k")) {
+                        return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                    }
+                    return ModelType.LLAVA_LLAMA_3_8B;
+                }
             } else if (lowerName.contains("llama")) {
                 return ModelType.LLAMA_3;
             } else if (lowerName.contains("qwen2")) {
                 return ModelType.QWEN_2;
             } else if (lowerName.contains("qwen3")) {
                 return ModelType.QWEN_3;
-            } else if (lowerName.contains("deepseek r1 distill")) {
-                return ModelType.DEEPSEEK_R1_DISTILL_QWEN;
             } else if (lowerName.contains("phi3")) {
                 return ModelType.PHI_3;
+            } else if (lowerName.contains("llava") || lowerName.contains("llava-llama") || lowerName.contains("llava-v")) {
+                // Detect LLaVA model variant
+                if (lowerName.contains("v1.5") || lowerName.contains("1.5") || lowerName.contains("v1_5")) {
+                    // LLaVA-1.5 variant - use Llama3-8B type for now (same architecture)
+                    return ModelType.LLAVA_LLAMA_3_8B_INT4; // LLaVA-1.5-7B with Q4 quantization
+                } else if (lowerName.contains("llama-3") || lowerName.contains("llama3")) {
+                    // LLaVA-Llama3 variant
+                    if (lowerName.contains("int4") || lowerName.contains("q4") || lowerName.contains("4_k")) {
+                        return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                    }
+                    return ModelType.LLAVA_LLAMA_3_8B;
+                } else {
+                    // Generic LLaVA - assume Llama3 variant
+                    if (lowerName.contains("int4") || lowerName.contains("q4") || lowerName.contains("4_k")) {
+                        return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                    }
+                    return ModelType.LLAVA_LLAMA_3_8B;
+                }
+            } else if (lowerName.contains("smolvlm") || lowerName.contains("smol-vlm") || 
+                       lowerName.contains("smolvlm2") || lowerName.contains("smolvlm-500m")) {
+                // SmolVLM model - check if it exists in ModelType
+                // return ModelType.SMOL_VLM_500M;
             }
-
+        }
+        
+        // Check filename if metadata doesn't provide clear identification
+        if (filename != null) {
+            if (filename.contains("llava") || filename.contains("llava-llama") || filename.contains("llava-v")) {
+                // Detect LLaVA model variant by filename
+                if (filename.contains("v1.5") || filename.contains("1.5") || filename.contains("v1_5")) {
+                    // LLaVA-1.5 variant - use Llama3-8B type for compatibility
+                    return ModelType.LLAVA_LLAMA_3_8B_INT4; // LLaVA-1.5-7B with Q4 quantization
+                } else if (filename.contains("llama-3") || filename.contains("llama3")) {
+                    // LLaVA-Llama3 variant
+                    if (filename.contains("int4") || filename.contains("q4") || filename.contains("4_k")) {
+                        return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                    }
+                    return ModelType.LLAVA_LLAMA_3_8B;
+                } else {
+                    // Generic LLaVA - assume Llama3 variant
+                    if (filename.contains("int4") || filename.contains("q4") || filename.contains("4_k")) {
+                        return ModelType.LLAVA_LLAMA_3_8B_INT4;
+                    }
+                    return ModelType.LLAVA_LLAMA_3_8B;
+                }
+            }
         }
 
         return ModelType.UNKNOWN;
@@ -81,17 +238,28 @@ public abstract class ModelLoader {
         GGUF gguf = GGUF.loadModel(ggufPath);
         FileChannel fileChannel = FileChannel.open(ggufPath, StandardOpenOption.READ);
         // detect model type
-        ModelType modelType = detectModelType(gguf.getMetadata());
+        ModelType modelType = detectModelType(gguf.getMetadata(), ggufPath);
+        
         // model type-specific load
         return modelType.loadModel(fileChannel, gguf, contextLength, loadWeights, useTornadovm);
     }
 
     public static FloatTensor loadQuantized(GGMLTensorEntry entry) {
         GGMLType ggmlType = entry.ggmlType();
+        
+        // Debug tensor loading for wcls
+        if (entry.name().contains("output.weight") || entry.name().contains("wcls")) {
+            System.err.printf("[LOAD-QUANTIZED-DEBUG] Loading tensor '%s' with ggmlType=%s (ordinal=%d)%n", 
+                            entry.name(), ggmlType, ggmlType.ordinal());
+        }
+        
         return switch (ggmlType) {
             case F32 -> new F32FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case Q8_0 -> new Q8_0FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case Q4_0 -> new Q4_0FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
+            case Q4_K -> new Q4_KFloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
+            case Q6_K -> new Q6_KFloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
+            case Q8_K -> new Q8_KFloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case F16 -> new F16FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             default -> throw new UnsupportedOperationException("Quantization format " + ggmlType);
         };
@@ -129,7 +297,12 @@ public abstract class ModelLoader {
     public static FloatArray[] loadArrayAsFloatArrayFromBuffer(int size, IntFunction<GGMLTensorEntry> getTensorEntry) {
         FloatArray[] array = new FloatArray[size];
         for (int i = 0; i < size; i++) {
-            array[i] = floatBufferToFloatArray(getTensorEntry.apply(i));
+            GGMLTensorEntry entry = getTensorEntry.apply(i);
+            if (entry == null) {
+                System.err.println("ERROR: Tensor entry is null at index " + i);
+                throw new RuntimeException("Missing tensor at index " + i);
+            }
+            array[i] = floatBufferToFloatArray(entry);
         }
         return array;
     }
@@ -149,14 +322,120 @@ public abstract class ModelLoader {
             }
             return array;
         } else {
-            // For quantized formats, we need to load through FloatTensor
+            // For quantized formats, use multi-threaded dequantization
             FloatTensor tensor = loadQuantized(entry);
-            FloatArray array = new FloatArray(tensor.size());
-            for (int i = 0; i < tensor.size(); i++) {
+            return loadTensorAsFloatArrayMultiThreaded(tensor, entry.name());
+        }
+    }
+
+    /**
+     * Multi-threaded tensor dequantization with configurable thread count.
+     * Thread count logic:
+     * - availableProcessors > 6: use (availableProcessors - 4)
+     * - availableProcessors <= 6: cap at 2
+     */
+    private static FloatArray loadTensorAsFloatArrayMultiThreaded(FloatTensor tensor, String tensorName) {
+        int tensorSize = tensor.size();
+
+        // CRITICAL FIX: Check for integer overflow causing negative allocation sizes
+        if (tensorSize < 0) {
+            System.err.printf("[ALLOCATION-ERROR] Tensor '%s' has negative size %d (integer overflow)%n", tensorName, tensorSize);
+            System.err.printf("[ALLOCATION-ERROR] This indicates the tensor is too large for current int-based allocation%n");
+            throw new IllegalArgumentException("Tensor too large for allocation: " + tensorName + " (size overflow: " + tensorSize + ")");
+        }
+
+        // 🚀 FLOATARRAY-LONGFIX: TornadoVM limitation has been resolved
+        // Previous block that prevented >2GB allocations has been removed
+        // TornadoVM FloatArray now supports large tensor allocations via integer overflow fix
+
+        // Safety check for extremely large tensors (secondary check)
+        long maxElementsPerTensor = 650_000_000L; // ~2.6GB at 4 bytes per element
+        if (tensorSize > maxElementsPerTensor) {
+            System.err.printf("[ALLOCATION-ERROR] Tensor '%s' size %d exceeds per-tensor limit %d%n", tensorName, tensorSize, maxElementsPerTensor);
+            System.err.printf("[ALLOCATION-ERROR] Memory required: %.2f GB (limit: %.2f GB)%n",
+                              tensorSize * 4.0 / (1024*1024*1024), maxElementsPerTensor * 4.0 / (1024*1024*1024));
+            throw new IllegalArgumentException("Tensor too large for allocation: " + tensorName + " (size: " + tensorSize + ")");
+        }
+
+        System.err.printf("[TENSOR-LOAD] Loading tensor '%s' with size %d%n", tensorName, tensorSize);
+        FloatArray array = new FloatArray(tensorSize);
+
+        // Get configured thread count
+        int threadCount = getOptimalThreadCount();
+
+        // For small tensors, use single-threaded to avoid overhead
+        if (tensorSize < 1000 || threadCount <= 1) {
+            System.err.printf("[Q4K-LOAD] Single-threaded: %s (%d elements)%n", tensorName, tensorSize);
+            for (int i = 0; i < tensorSize; i++) {
                 array.set(i, tensor.getFloat(i));
             }
             return array;
         }
+
+        System.err.printf("[Q4K-LOAD] Multi-threaded (%d threads): %s (%d elements)%n",
+                         threadCount, tensorName, tensorSize);
+
+        // Create thread pool for parallel processing
+        java.util.concurrent.ForkJoinPool customThreadPool = new java.util.concurrent.ForkJoinPool(threadCount);
+        try {
+            // Split work into chunks for parallel processing
+            int chunkSize = Math.max(256, tensorSize / threadCount); // Minimum 256 elements per chunk for efficiency
+            java.util.List<java.util.concurrent.CompletableFuture<Void>> futures = new java.util.ArrayList<>();
+
+            for (int start = 0; start < tensorSize; start += chunkSize) {
+                final int chunkStart = start;
+                final int chunkEnd = Math.min(start + chunkSize, tensorSize);
+
+                java.util.concurrent.CompletableFuture<Void> future = java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    for (int i = chunkStart; i < chunkEnd; i++) {
+                        array.set(i, tensor.getFloat(i));
+                    }
+                }, customThreadPool);
+
+                futures.add(future);
+            }
+
+            // Wait for all chunks to complete
+            java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+
+        } finally {
+            customThreadPool.shutdown();
+        }
+
+        return array;
+    }
+
+    /**
+     * Get optimal thread count for Q4K dequantization based on system configuration.
+     */
+    private static int getOptimalThreadCount() {
+        // Check system property first
+        String threadProp = System.getProperty("q4k.dequant.threads");
+        if (threadProp != null) {
+            try {
+                int threads = Integer.parseInt(threadProp);
+                if (threads == 0) return 1; // Single-threaded
+                if (threads > 0) return threads; // Explicit thread count
+                // threads < 0 falls through to auto-detection
+            } catch (NumberFormatException e) {
+                System.err.println("[Q4K-THREADS] Invalid q4k.dequant.threads value: " + threadProp + ", using auto-detection");
+            }
+        }
+
+        // Auto-detection logic
+        int availableProcessors = Runtime.getRuntime().availableProcessors();
+        int optimalThreads;
+
+        if (availableProcessors <= 6) {
+            optimalThreads = Math.min(2, availableProcessors); // Cap at 2 for low-core systems
+        } else {
+            optimalThreads = availableProcessors - 4; // Leave 4 cores for system
+        }
+
+        System.err.printf("[Q4K-THREADS] Auto-detected: %d available processors, using %d threads for dequantization%n",
+                         availableProcessors, optimalThreads);
+
+        return Math.max(1, optimalThreads); // Ensure at least 1 thread
     }
 
     public static HalfFloatArray loadTensorAsHalfFloatArray(GGMLTensorEntry entry) {
@@ -164,15 +443,64 @@ public abstract class ModelLoader {
             System.out.println("Loading F32 tensor as HalfFloatArray");
             return null;
         } else {
-            // For quantized formats, we need to load through FloatTensor
+            // For quantized formats, use multi-threaded dequantization
             FloatTensor tensor = loadQuantized(entry);
-            HalfFloatArray array = new HalfFloatArray(tensor.size());
-            for (int i = 0; i < tensor.size(); i++) {
+            return loadTensorAsHalfFloatArrayMultiThreaded(tensor, entry.name());
+        }
+    }
+
+    /**
+     * Multi-threaded tensor dequantization to HalfFloatArray.
+     */
+    private static HalfFloatArray loadTensorAsHalfFloatArrayMultiThreaded(FloatTensor tensor, String tensorName) {
+        int tensorSize = tensor.size();
+        HalfFloatArray array = new HalfFloatArray(tensorSize);
+
+        // Get configured thread count
+        int threadCount = getOptimalThreadCount();
+
+        // For small tensors, use single-threaded to avoid overhead
+        if (tensorSize < 1000 || threadCount <= 1) {
+            System.err.printf("[Q4K-LOAD-HALF] Single-threaded: %s (%d elements)%n", tensorName, tensorSize);
+            for (int i = 0; i < tensorSize; i++) {
                 HalfFloat x = new HalfFloat(tensor.getFloat(i));
                 array.set(i, x);
             }
             return array;
         }
+
+        System.err.printf("[Q4K-LOAD-HALF] Multi-threaded (%d threads): %s (%d elements)%n",
+                         threadCount, tensorName, tensorSize);
+
+        // Create thread pool for parallel processing
+        java.util.concurrent.ForkJoinPool customThreadPool = new java.util.concurrent.ForkJoinPool(threadCount);
+        try {
+            // Split work into chunks for parallel processing
+            int chunkSize = Math.max(256, tensorSize / threadCount);
+            java.util.List<java.util.concurrent.CompletableFuture<Void>> futures = new java.util.ArrayList<>();
+
+            for (int start = 0; start < tensorSize; start += chunkSize) {
+                final int chunkStart = start;
+                final int chunkEnd = Math.min(start + chunkSize, tensorSize);
+
+                java.util.concurrent.CompletableFuture<Void> future = java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    for (int i = chunkStart; i < chunkEnd; i++) {
+                        HalfFloat x = new HalfFloat(tensor.getFloat(i));
+                        array.set(i, x);
+                    }
+                }, customThreadPool);
+
+                futures.add(future);
+            }
+
+            // Wait for all chunks to complete
+            java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
+
+        } finally {
+            customThreadPool.shutdown();
+        }
+
+        return array;
     }
 
     public static FloatTensor[] loadArrayOfQuantized(int size, IntFunction<GGMLTensorEntry> getTensorEntry) {
@@ -224,12 +552,17 @@ public abstract class ModelLoader {
         GGMLTensorEntry tokenEmbeddings = tensorEntries.get("token_embd.weight");
         GGMLTensorEntry outputWeight = tensorEntries.getOrDefault("output.weight", tokenEmbeddings);
 
+        System.err.printf("[MODELLOADER-DEBUG] useTornadovm=%b, will load %s weights%n",
+                          useTornadovm, useTornadovm ? "TornadoVM" : "Standard");
+
         if (useTornadovm) {
             if (TornadoVMMasterPlan.ENABLE_TORNADOVM_INIT_TIME) {
                 System.out.println("Loading model weights in TornadoVM format (loading " + outputWeight.ggmlType() + " -> " + GGMLType.F16 + ")");
             }
+            System.err.println("[MODELLOADER-DEBUG] Creating TornadoVMWeights");
             return createTornadoVMWeights(tensorEntries, config, ropeFreqs, tokenEmbeddings, outputWeight);
         } else {
+            System.err.println("[MODELLOADER-DEBUG] Creating StandardWeights");
             return createStandardWeights(tensorEntries, config, ropeFreqs, tokenEmbeddings, outputWeight);
         }
     }

@@ -1,11 +1,17 @@
 package org.beehive.gpullama3.model;
 
 import org.beehive.gpullama3.core.model.GGUF;
+import org.beehive.gpullama3.model.loader.GemmaModelLoader;
+import org.beehive.gpullama3.model.loader.GptOssModelLoader;
+import org.beehive.gpullama3.model.loader.GraniteModelLoader;
 import org.beehive.gpullama3.model.loader.LlamaModelLoader;
 import org.beehive.gpullama3.model.loader.MistralModelLoader;
 import org.beehive.gpullama3.model.loader.Phi3ModelLoader;
 import org.beehive.gpullama3.model.loader.Qwen2ModelLoader;
+import org.beehive.gpullama3.model.loader.OlmoeModelLoader;
+import org.beehive.gpullama3.model.loader.Phi4ModelLoader;
 import org.beehive.gpullama3.model.loader.Qwen3ModelLoader;
+import org.beehive.gpullama3.model.loader.LlavaModelLoader;
 
 import java.nio.channels.FileChannel;
 
@@ -64,6 +70,70 @@ public enum ModelType {
         }
     },
 
+    GEMMA_3 {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new GemmaModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+    GPT_OSS {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new GptOssModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+    GRANITE_3_3 {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new GraniteModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+    DEEPSEEK_R1_DISTILL_QWEN_1_5B {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new Qwen2ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+    OLMOE_1B_7B {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new OlmoeModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+    PHI_4_MINI_REASONING {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new Phi4ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+    QWEN3_30B_A3B {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new Qwen3ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+
+    LLAVA_LLAMA_3_8B {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new LlavaModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+    LLAVA_LLAMA_3_8B_INT4 {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new LlavaModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
     UNKNOWN {
         @Override
         public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
@@ -75,6 +145,18 @@ public enum ModelType {
     public abstract Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm);
 
     public boolean isDeepSeekR1() {
-        return this == DEEPSEEK_R1_DISTILL_QWEN;
+        return this == DEEPSEEK_R1_DISTILL_QWEN || this == DEEPSEEK_R1_DISTILL_QWEN_1_5B;
+    }
+    
+    public boolean isReasoningModel() {
+        return this == DEEPSEEK_R1_DISTILL_QWEN || this == DEEPSEEK_R1_DISTILL_QWEN_1_5B || this == PHI_4_MINI_REASONING;
+    }
+    
+    public boolean isMoEModel() {
+        return this == GPT_OSS || this == OLMOE_1B_7B || this == QWEN3_30B_A3B;
+    }
+    
+    public boolean isVisionLanguageModel() {
+        return this == LLAVA_LLAMA_3_8B || this == LLAVA_LLAMA_3_8B_INT4;
     }
 }

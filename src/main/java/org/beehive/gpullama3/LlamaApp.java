@@ -9,9 +9,16 @@ import org.beehive.gpullama3.inference.sampler.ToppSampler;
 import org.beehive.gpullama3.model.Model;
 import org.beehive.gpullama3.model.loader.ModelLoader;
 import org.beehive.gpullama3.tornadovm.FloatArrayUtils;
+import org.beehive.gpullama3.multimodal.data.MultimodalInput;
+import org.beehive.gpullama3.multimodal.data.ImageData;
+import org.beehive.gpullama3.vision.processor.NativeImageProcessor;
+import org.beehive.gpullama3.model.llava.Llava;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.util.List;
 import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
 
@@ -65,13 +72,15 @@ public class LlamaApp {
             sampler = Sampler.TENSOR_ARGMAX; // Use TENSOR_ARGMAX instead of ARGMAX
         } else {
             // we sample from this distribution to get the next token
-            RandomGenerator rng = RandomGeneratorFactory.getDefault().create(rngSeed);
+            // Use time-based entropy to prevent repetitive patterns
+            long entropyEnhancedSeed = rngSeed ^ System.nanoTime() ^ Thread.currentThread().getId();
+            RandomGenerator rng = RandomGeneratorFactory.getDefault().create(entropyEnhancedSeed);
             Sampler innerSampler;
             // Determine whether to use top-p (nucleus) sampling
             if (topp <= 0 || topp >= 1) {
                 // If topp is outside (0,1), use standard categorical sampling
                 // This samples directly from the probability distribution
-                innerSampler = new CategoricalSampler(rng);
+                innerSampler = new CategoricalSampler(rng, vocabularySize);
             } else {
                 // Use top-p (nucleus) sampling with the specified threshold
                 // This restricts sampling to only the most likely tokens that
@@ -84,25 +93,79 @@ public class LlamaApp {
             // 2. Converts logits to probabilities using softmax
             // 3. Delegates the actual sampling to the appropriate inner sampler
             sampler = logits -> {
+                System.err.println("[LAMBDA-DEBUG] ===== LAMBDA SAMPLER WRAPPER CALLED =====");
+                System.err.printf("[LAMBDA-DEBUG] Logits type: %s%n", 
+                    logits != null ? logits.getClass().getName() : "null");
+                
                 // Handle different logits formats to support both CPU and GPU paths
                 if (logits instanceof FloatTensor) {
                     // For CPU path using FloatTensor
                     FloatTensor tensorLogits = (FloatTensor) logits;
+                    System.err.printf("[LAMBDA-DEBUG] FloatTensor size BEFORE processing: %d%n", tensorLogits.size());
                     // Apply temperature scaling - lower values make distribution more peaked
                     tensorLogits.divideInPlace(0, tensorLogits.size(), temperature);
                     // Convert logits to probabilities using softmax
                     tensorLogits.softmaxInPlace(0, tensorLogits.size());
+                    System.err.printf("[LAMBDA-DEBUG] FloatTensor size AFTER processing: %d%n", tensorLogits.size());
                 } else if (logits instanceof FloatArray) {
                     // For GPU path using FloatArray
                     FloatArray arrayLogits = (FloatArray) logits;
+                    System.err.printf("[LAMBDA-DEBUG] FloatArray size BEFORE processing: %d%n", arrayLogits.getSize());
+                    
+                    // 🚨 CRITICAL VOCABULARY BOUNDS FIX 🚨
+                    // Some models (like Gemma) have larger vocabulary sizes than others
+                    // Use the actual model vocabulary size instead of hardcoding
+                    final int VOCAB_SIZE = vocabularySize;
+                    if (arrayLogits.getSize() > VOCAB_SIZE) {
+                        System.err.printf("[VOCAB-FIX] 🔥 Truncating logits from %d to %d (vocab bounds)%n", 
+                            arrayLogits.getSize(), VOCAB_SIZE);
+                        
+                        // Create new truncated array with only vocabulary-valid logits
+                        FloatArray truncatedLogits = new FloatArray(VOCAB_SIZE);
+                        for (int i = 0; i < VOCAB_SIZE; i++) {
+                            truncatedLogits.set(i, arrayLogits.get(i));
+                        }
+                        arrayLogits = truncatedLogits;
+                        logits = arrayLogits; // Update the logits reference
+                        System.err.printf("[VOCAB-FIX] ✅ Logits truncated to valid vocabulary size: %d%n", arrayLogits.getSize());
+                    } else {
+                        System.err.printf("[VOCAB-FIX] ✅ Logits size %d is within vocab bounds%n", arrayLogits.getSize());
+                    }
+                    
                     // Apply the same operations but using FloatArray-specific methods for TornadoVM data types
                     FloatArrayUtils.divideInPlace(arrayLogits, 0, arrayLogits.getSize(), temperature);
                     FloatArrayUtils.softmaxInPlace(arrayLogits, 0, arrayLogits.getSize());
+                    System.err.printf("[LAMBDA-DEBUG] FloatArray size AFTER processing: %d%n", arrayLogits.getSize());
                 } else {
                     // If logits are neither FloatTensor nor FloatArray, throw an exception
                     throw new IllegalArgumentException("Unsupported logits type: " + (logits != null ? logits.getClass().getName() : "null"));
                 }
-                return innerSampler.sampleToken(logits);
+                
+                // GRANITE DEBUG: Check logits values to see why token 0 is always selected
+                if (logits instanceof FloatArray floatArrayLogits) {
+                    float maxLogit = Float.NEGATIVE_INFINITY;
+                    int maxToken = -1;
+                    float token0Logit = floatArrayLogits.get(0);
+                    int nonZeroLogits = 0;
+
+                    for (int i = 0; i < Math.min(floatArrayLogits.getSize(), 100); i++) {
+                        float logit = floatArrayLogits.get(i);
+                        if (Math.abs(logit) > 1e-8) nonZeroLogits++;
+                        if (logit > maxLogit) {
+                            maxLogit = logit;
+                            maxToken = i;
+                        }
+                    }
+
+                    System.err.printf("[GRANITE-LOGITS] Token 0 logit: %.6f, Max logit: %.6f (token %d), Non-zero logits: %d/%d%n",
+                                     token0Logit, maxLogit, maxToken, nonZeroLogits, Math.min(floatArrayLogits.getSize(), 100));
+                }
+
+                System.err.println("[LAMBDA-DEBUG] About to call innerSampler.sampleToken()...");
+                int result = innerSampler.sampleToken(logits);
+                System.err.printf("[LAMBDA-DEBUG] innerSampler returned token: %d%n", result);
+                System.err.println("[LAMBDA-DEBUG] ===== LAMBDA SAMPLER WRAPPER RETURNING =====");
+                return result;
             };
         }
         return sampler;
@@ -130,6 +193,7 @@ public class LlamaApp {
             }
             return model;
         }
+        System.err.printf("[LLAMAAPP-DEBUG] Loading model with useTornadovm=%b%n", options.useTornadovm());
         return ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true, options.useTornadovm());
     }
 
@@ -138,10 +202,83 @@ public class LlamaApp {
     }
 
     private static void runSingleInstruction(Model model, Sampler sampler, Options options) {
-        String response = model.runInstructOnce(sampler, options);
-        System.out.println(response);
-        if (SHOW_PERF_INTERACTIVE) {
-            LastRunMetrics.printMetrics();
+        // Check if image is provided for multimodal inference
+        if (options.imagePath() != null) {
+            runMultimodalInstruction(model, sampler, options);
+        } else {
+            String response = model.runInstructOnce(sampler, options);
+            System.out.println(response);
+            if (SHOW_PERF_INTERACTIVE) {
+                LastRunMetrics.printMetrics();
+            }
+        }
+    }
+    
+    /**
+     * Handle multimodal (image + text) inference.
+     */
+    private static void runMultimodalInstruction(Model model, Sampler sampler, Options options) {
+        try {
+            // Load and process the image
+            byte[] imageBytes = Files.readAllBytes(options.imagePath());
+            System.err.println("Loaded image: " + options.imagePath() + " (" + imageBytes.length + " bytes)");
+            
+            // Process image using native Java implementation with CLIP parameters
+            NativeImageProcessor processor = new NativeImageProcessor();
+            ImageData imageData = processor.preprocessImage(imageBytes, 336, true); // CLIP ViT-Large uses 336x336
+            System.err.println("Processed image: " + imageData);
+            
+            // Create multimodal input with text prompt and image
+            String textPrompt = options.prompt();
+            
+            // Tokenize the text prompt using the model's tokenizer
+            List<Integer> tokenList = model.tokenizer().encodeAsList(textPrompt);
+            int[] textTokens = tokenList.stream().mapToInt(Integer::intValue).toArray();
+            System.err.println("Tokenized text: " + textTokens.length + " tokens");
+            
+            MultimodalInput multimodalInput = MultimodalInput.textAndImage(textPrompt, imageData, textTokens);
+            System.err.println("Created multimodal input: " + multimodalInput.getSummary());
+            
+            // Note: Image successfully preprocessed with CLIP parameters
+            System.err.println("✅ Image preprocessing successful with native Java implementation");
+            System.err.println("✅ Applied CLIP normalization (mean=[0.481,0.458,0.408], std=[0.269,0.261,0.276])");
+            
+            String response;
+            if (model instanceof Llava) {
+                System.err.println("✅ Detected LLaVA model - using multimodal inference");
+                Llava llavaModel = (Llava) model;
+                
+                try {
+                    // Generate tokens using complete multimodal pipeline
+                    List<Integer> responseTokens = llavaModel.generateTokensMultimodal(multimodalInput, options.maxTokens(), sampler, options);
+                    
+                    // Convert tokens to text using the tokenizer
+                    response = model.tokenizer().decode(responseTokens);
+                    
+                    System.err.println("✅ Generated multimodal response: " + responseTokens.size() + " tokens");
+                } catch (Exception e) {
+                    System.err.println("Error in multimodal generation: " + e.getMessage());
+                    e.printStackTrace();
+                    // Fallback to text-only inference
+                    response = model.runInstructOnce(sampler, options);
+                }
+            } else {
+                System.err.println("⚠️ Non-VLM model detected - falling back to text inference");
+                response = model.runInstructOnce(sampler, options);
+            }
+            System.out.println(response);
+            if (SHOW_PERF_INTERACTIVE) {
+                LastRunMetrics.printMetrics();
+            }
+            
+        } catch (IOException e) {
+            System.err.println("Error loading image: " + e.getMessage());
+            e.printStackTrace();
+            System.exit(1);
+        } catch (Exception e) {
+            System.err.println("Error processing multimodal input: " + e.getMessage());
+            e.printStackTrace();
+            System.exit(1);
         }
     }
 
@@ -156,7 +293,7 @@ public class LlamaApp {
      * @throws IOException
      *         if model loading or file operations fail.
      */
-    static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws IOException {
         Options options = Options.parseOptions(args);
         Model model = loadModel(options);
         Sampler sampler = createSampler(model, options);

@@ -1,6 +1,7 @@
 package org.beehive.gpullama3.tornadovm;
 
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 import uk.ac.manchester.tornado.api.math.TornadoMath;
 
 /**

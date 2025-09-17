@@ -196,8 +196,16 @@ public interface Model {
             promptTokens.add(chatFormat.getBeginOfText());
         }
 
-        if (shouldAddSystemPrompt() && options.systemPrompt() != null) {
-            promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
+        // GRANITE FIX: Ensure Granite models always have a system prompt
+        String systemPrompt = options.systemPrompt();
+        if (shouldAddSystemPrompt()) {
+            if (systemPrompt == null && getModelType().toString().contains("GRANITE")) {
+                systemPrompt = "You are a helpful assistant.";
+                System.err.println("[GRANITE-FIX] Added mandatory system prompt for Granite model");
+            }
+            if (systemPrompt != null) {
+                promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, systemPrompt)));
+            }
         }
 
         // Initialize TornadoVM plan once at the beginning if GPU path is enabled
@@ -270,8 +278,16 @@ public interface Model {
             promptTokens.add(chatFormat.getBeginOfText());
         }
 
-        if (shouldAddSystemPrompt() && options.systemPrompt() != null) {
-            promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
+        // GRANITE FIX: Ensure Granite models always have a system prompt
+        String systemPrompt = options.systemPrompt();
+        if (shouldAddSystemPrompt()) {
+            if (systemPrompt == null && getModelType().toString().contains("GRANITE")) {
+                systemPrompt = "You are a helpful assistant.";
+                System.err.println("[GRANITE-FIX] Added mandatory system prompt for Granite model");
+            }
+            if (systemPrompt != null) {
+                promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, systemPrompt)));
+            }
         }
 
         // Initialize TornadoVM plan once at the beginning if GPU path is enabled

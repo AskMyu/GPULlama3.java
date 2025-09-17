@@ -5,6 +5,7 @@ import org.beehive.gpullama3.inference.weights.tornado.TornadoWeights;
 import org.beehive.gpullama3.model.Configuration;
 import org.beehive.gpullama3.model.Model;
 import org.beehive.gpullama3.inference.state.State;
+import org.beehive.gpullama3.tornadovm.SmartCacheArray;
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
@@ -12,6 +13,8 @@ import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.WorkerGrid1D;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
+import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -51,6 +54,7 @@ import java.util.List;
         protected final C config;
         protected final W weights;
         protected final KernelContext context;
+        protected final Model model;
 
         /**
          * Constructs a TornadoVMLayerPlanner for the given Llama model.
@@ -65,9 +69,10 @@ import java.util.List;
             this.config = (C) model.configuration();
             this.weights = (W) model.weights();
             this.context = new KernelContext();
+            this.model = model;
         }
 
-        public Tuple2<List<ImmutableTaskGraph>, GridScheduler> setupTornadoForwardPlanLayered() {
+        public Tuple2<List<ImmutableTaskGraph>, GridScheduler> setupTornadoForwardPlanLayered() throws Exception {
             List<ImmutableTaskGraph> taskGraphs = new ArrayList<>();
 
             state.temp.init(0.0f);
@@ -75,7 +80,7 @@ import java.util.List;
             state.tempLogits.init(0.0f);
 
             // @formatter:off
-            TaskGraph activationUpdate = new TaskGraph("activationUpdate")
+            TaskGraph activationUpdate = TornadoVMSafeInitializer.createTaskGraphSafely("activationUpdate")
                     .transferToDevice(DataTransferMode.EVERY_EXECUTION, state.wrapX)
                     .task("updateX", TransformerComputeKernels::emptyTaskToForceCopyIn, state.wrapX)
                     .persistOnDevice(state.wrapX);
@@ -83,7 +88,7 @@ import java.util.List;
 
         TaskGraph unifiedLayer = null;
         for (int layerIndex =0; layerIndex < config.numberOfLayers(); layerIndex++) {
-            unifiedLayer = new TaskGraph("layer_" + layerIndex);
+            unifiedLayer = TornadoVMSafeInitializer.createTaskGraphSafely("layer_" + layerIndex);
             unifiedLayer.consumeFromDevice(state.wrapX);
             unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION,
                     //Copy-in weights per layer for batched-layered layout
@@ -112,9 +117,9 @@ import java.util.List;
                         state.positionHolder, state.wrapQ, state.wrapK, config.kvDim(),
                         config.headSize())
                 .task("copyToCaches", TransformerComputeKernelsLayered::copyToCache,
-                        state.wrapKeyCache, state.wrapK,  state.wrapValueCache, state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength())
+                        getFloatArrayFromCache(state.wrapKeyCache), state.wrapK,  getFloatArrayFromCache(state.wrapValueCache), state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength())
                 .task("parallel-attention", TransformerComputeKernelsLayered::processHeadsFlashAttention, context,
-                        state.wrapQ, state.wrapKeyCache, state.wrapValueCache, state.wrapXb,
+                        state.wrapQ, getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), state.wrapXb,
                         config.numberOfHeads(), config.headSize(), config.kvDim(), config.kvMul(),
                         state.positionHolder, layerIndex, config.contextLength())
                 .task("matmul1", TransformerComputeKernelsLayered::matrixVectorGenericWithResidual, context,
@@ -134,7 +139,7 @@ import java.util.List;
         }
 
         TaskGraph lastUnifiedLayer = unifiedLayer;
-        TaskGraph logits = new TaskGraph("logits")
+        TaskGraph logits = TornadoVMSafeInitializer.createTaskGraphSafely("logits")
                 .consumeFromDevice(lastUnifiedLayer.getTaskGraphName(),
                         state.wrapX
                 )
@@ -178,20 +183,24 @@ import java.util.List;
          *
          * @param logits The existing task graph to extend with the projection operation
          * @return The modified task graph with the projection task added
-         * @throws UnsupportedOperationException If weights.weightType is not Q8_0 or Q4_0
+         * @throws UnsupportedOperationException If weights.weightType is not supported
          */
         // @formatter:on
         protected TaskGraph configureQuantizedMatrixVectorFinalWeight(TaskGraph logits) {
             switch (weights.getWeightType()) {
+                case F32:
                 case F16:
                 case Q8_0:
                 case Q4_0:
+                case Q4_K:
+                case Q6_K:
+                case Q8_K:
                     logits.task("projection", TransformerComputeKernelsLayered::matrixVectorGeneric,  //
                             context, state.wrapX, state.wrapLogits, weights.wclsHalfFloat, //
                             config.dim(), config.vocabularySize(), LOCAL_WORK_GROUP_SIZE_ALLOC * THREAD_SCALE_FOR_LOGITS); //
                     break;
                 default:
-                    throw new UnsupportedOperationException("Unsupported weight quantization type: " + weights.getWeightType() + ". Only Q8_0 and Q4_0 are supported.");
+                    throw new UnsupportedOperationException("Unsupported weight quantization type: " + weights.getWeightType() + ". Supported types: F32, F16, Q8_0, Q4_0, Q4_K, Q6_K, Q8_K");
             }
             return logits;
         }
@@ -220,13 +229,13 @@ import java.util.List;
                 unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, //
                         context, state.wrapXb, state.wrapXb2, //
                         state.wrapQ, state.wrapK, state.wrapV, //
-                        state.wrapKeyCache, state.wrapValueCache, //
+                        getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), //
                         state.wrapAtt, state.wrapHb); //
             } else {
                 // Subsequent layers: Consume data already on device from previous layer
                 unifiedLayer.consumeFromDevice(context, state.wrapXb, state.wrapXb2, //
                         state.wrapQ, state.wrapK, state.wrapV, //
-                        state.wrapKeyCache, state.wrapValueCache, //
+                        getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), //
                         state.wrapAtt, state.wrapHb, //
                         state.positionHolder //
                 );
@@ -318,6 +327,14 @@ import java.util.List;
             copyToCachesWorker.setGlobalWork(config.dim(), 1, 1);
             copyToCachesWorker.setLocalWork(128, 1, 1); // Set local work size to 32 (for copying to caches)
 
+            // VLM Batch Processing worker configuration
+            // OpenCL equivalent: clEnqueueNDRangeKernel(globalWorkSize=[144*8,1,1], localWorkSize=[8,1,1])
+            // CUDA equivalent: kernel<<<dim3(144,1,1), dim3(8,1,1)>>>
+            // For 144 vision tokens with 8-thread batches optimized for RTX 2000 Ada
+            WorkerGrid vlmBatchWorker = new WorkerGrid1D(144);
+            vlmBatchWorker.setGlobalWork(144 * 8, 1, 1);  // 144 vision tokens * 8 threads per token
+            vlmBatchWorker.setLocalWork(8, 1, 1);         // 8 threads per workgroup (GPU-optimized)
+
             // Map workers to tasks
             tornadoForwardScheduler.addWorkerGrid("activationUpdate.updateX", singleWorker);
             for (int i = 0; i < config.numberOfLayers(); i++) {
@@ -334,6 +351,9 @@ import java.util.List;
                 tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".mapContextFFN", rmsNormWorker);
                 tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".parallel-attention", parallelAttentionWorker);
                 tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".copyToCaches", copyToCachesWorker);
+                // VLM-specific task mappings for vision batch processing
+                tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".vlmBatchKeyProjection", vlmBatchWorker);
+                tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".vlmBatchValueProjection", vlmBatchWorker);
             }
 
             // Vocabulary worker configuration
@@ -410,6 +430,13 @@ import java.util.List;
             copyToCachesWorker.setGlobalWork(config.dim(), 1, 1);
             copyToCachesWorker.setLocalWork(128, 1, 1); // Set local work size to 32 (for copying to caches)
 
+            // VLM Batch Processing worker configuration (Non-Nvidia optimized)
+            // OpenCL equivalent: clEnqueueNDRangeKernel(globalWorkSize=[144*4,1,1], localWorkSize=[4,1,1])
+            // For 144 vision tokens with 4-thread batches optimized for non-Nvidia GPUs
+            WorkerGrid vlmBatchWorker = new WorkerGrid1D(144);
+            vlmBatchWorker.setGlobalWork(144 * 4, 1, 1);  // 144 vision tokens * 4 threads per token (non-Nvidia)
+            vlmBatchWorker.setLocalWork(4, 1, 1);         // 4 threads per workgroup (non-Nvidia optimized)
+
             // Map workers to tasks
             tornadoForwardScheduler.addWorkerGrid("activationUpdate.updateX", singleWorker);
             for (int i = 0; i < config.numberOfLayers(); i++) {
@@ -426,6 +453,9 @@ import java.util.List;
                 tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".mapContextFFN", rmsNormWorker);
                 tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".parallel-attention", parallelAttentionWorker);
                 tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".copyToCaches", copyToCachesWorker);
+                // VLM-specific task mappings for vision batch processing (Non-Nvidia)
+                tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".vlmBatchKeyProjection", vlmBatchWorker);
+                tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".vlmBatchValueProjection", vlmBatchWorker);
             }
 
             // Vocabulary worker configuration
@@ -442,7 +472,50 @@ import java.util.List;
             return tornadoForwardScheduler;
         }
 
-        public Tuple2<List<ImmutableTaskGraph>, GridScheduler> setupTornadoForwardPlanLayeredNonNvidia() {
+        /**
+         * Creates VLM TaskGraph using proven GridScheduler approach
+         * 
+         * Integrates VLM batch processing kernels into TornadoVM master execution plan
+         * following the working non-VLM pattern with proper GPU thread mapping.
+         * 
+         * @param layerIndex Layer to process (0 to numberOfLayers-1)
+         * @param batchInput Vision embeddings input [batchSize, inputDim]
+         * @param keyWeights Key projection weights [kvDim, inputDim]
+         * @param valueWeights Value projection weights [kvDim, inputDim]
+         * @param batchKeyCache Key cache output [batchSize, kvDim]
+         * @param batchValueCache Value cache output [batchSize, kvDim]
+         * @param batchSize Number of vision tokens (144)
+         * @param inputDim Input embedding dimension
+         * @param kvDim Key-value output dimension
+         * @return Immutable TaskGraph for VLM processing at specified layer
+         */
+        public ImmutableTaskGraph createVLMTaskGraph(
+                int layerIndex,
+                FloatArray batchInput,
+                FloatArray keyWeights,
+                FloatArray valueWeights,
+                FloatArray batchKeyCache,
+                FloatArray batchValueCache,
+                int batchSize,
+                int inputDim,
+                int kvDim) throws Exception {
+            
+            KernelContext context = new KernelContext();
+            
+            TaskGraph vlmTaskGraph = TornadoVMSafeInitializer.createTaskGraphSafely("vlm_layer_" + layerIndex)
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, batchInput, keyWeights, valueWeights)
+                .task("vlmBatchKeyProjection", TransformerComputeKernelsLayered::vlmBatchKeyProjection,
+                      context, batchInput, keyWeights, batchKeyCache,
+                      batchSize, inputDim, kvDim)
+                .task("vlmBatchValueProjection", TransformerComputeKernelsLayered::vlmBatchValueProjection,
+                      context, batchInput, valueWeights, batchValueCache,
+                      batchSize, inputDim, kvDim)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, batchKeyCache, batchValueCache);
+            
+            return vlmTaskGraph.snapshot();
+        }
+
+        public Tuple2<List<ImmutableTaskGraph>, GridScheduler> setupTornadoForwardPlanLayeredNonNvidia() throws Exception {
             List<ImmutableTaskGraph> taskGraphs = new ArrayList<>();
 
             state.temp.init(0.0f);
@@ -450,7 +523,7 @@ import java.util.List;
             state.tempLogits.init(0.0f);
 
             // @formatter:off
-            TaskGraph activationUpdate = new TaskGraph("activationUpdate")
+            TaskGraph activationUpdate = TornadoVMSafeInitializer.createTaskGraphSafely("activationUpdate")
                     .transferToDevice(DataTransferMode.EVERY_EXECUTION, state.wrapX)
                     .task("updateX", TransformerComputeKernels::emptyTaskToForceCopyIn, state.wrapX)
                     .persistOnDevice(state.wrapX);
@@ -458,7 +531,7 @@ import java.util.List;
 
             TaskGraph unifiedLayer = null;
             for (int layerIndex =0; layerIndex < config.numberOfLayers(); layerIndex++) {
-                unifiedLayer = new TaskGraph("layer_" + layerIndex);
+                unifiedLayer = TornadoVMSafeInitializer.createTaskGraphSafely("layer_" + layerIndex);
                 unifiedLayer.consumeFromDevice(state.wrapX);
                 unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION,
                         //Copy-in weights per layer for batched-layered layout
@@ -489,9 +562,9 @@ import java.util.List;
                                 state.positionHolder, state.wrapQ, state.wrapK, config.kvDim(),
                                 config.headSize())
                         .task("copyToCaches", TransformerComputeKernelsLayered::copyToCache,
-                                state.wrapKeyCache, state.wrapK,  state.wrapValueCache, state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength())
+                                getFloatArrayFromCache(state.wrapKeyCache), state.wrapK,  getFloatArrayFromCache(state.wrapValueCache), state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength())
                         .task("parallel-attention", TransformerComputeKernelsLayered::processHeadsParallel,
-                                state.wrapQ, state.wrapKeyCache, state.wrapValueCache, state.wrapXb,
+                                state.wrapQ, getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), state.wrapXb,
                                 config.numberOfHeads(), config.headSize(), config.kvDim(), config.kvMul(), config.vocabularySize(),
                                 state.positionHolder, state.wrapAtt, layerIndex, config.contextLength())
                         .task("matmul1", TransformerComputeKernelsLayered::matrixVectorGenericWithResidual, context,
@@ -513,7 +586,7 @@ import java.util.List;
             }
 
             TaskGraph lastUnifiedLayer = unifiedLayer;
-            TaskGraph logits = new TaskGraph("logits")
+            TaskGraph logits = TornadoVMSafeInitializer.createTaskGraphSafely("logits")
                     .consumeFromDevice(lastUnifiedLayer.getTaskGraphName(),
                             state.wrapX
                     )
@@ -538,6 +611,47 @@ import java.util.List;
             // @formatter:on
 
             return new Tuple2<>(taskGraphs, setupGridSchedulersLayeredNonNvidia());
+        }
+        
+        /**
+         * Helper method to determine if mixed precision kernels should be used for oscillation-prone models.
+         */
+        protected boolean shouldUseMixedPrecision() {
+            String modelTypeName = model.getModelType().name();
+            return modelTypeName.contains("GRANITE") || modelTypeName.contains("GEMMA");
+        }
+
+        /**
+         * Helper method to get the appropriate model type string for mixed precision kernels.
+         */
+        protected String getModelTypeForKernels() {
+            String modelTypeName = model.getModelType().name();
+            if (modelTypeName.contains("GRANITE")) return "GRANITE";
+            if (modelTypeName.contains("GEMMA")) return "GEMMA";
+            return "STANDARD";
+        }
+
+        /**
+         * Helper method to extract FloatArray from cache objects (SmartCacheArray or FloatArray).
+         * For SmartCacheArray, returns the direct array if not batched, or the first batch if batched.
+         */
+        private FloatArray getFloatArrayFromCache(Object cache) {
+            if (cache instanceof SmartCacheArray) {
+                SmartCacheArray smartCache = (SmartCacheArray) cache;
+                if (smartCache.isBatched()) {
+                    // For batched arrays, use the first batch for now
+                    // Full batch coordination would be implemented in a future version
+                    System.err.printf("[TORNADO-PLANNER] Warning: Using first batch of %d batches for cache operations%n", 
+                                    smartCache.getNumBatches());
+                    return smartCache.getBatch(0);
+                } else {
+                    return smartCache.getDirectArray();
+                }
+            } else if (cache instanceof FloatArray) {
+                return (FloatArray) cache;
+            } else {
+                throw new IllegalArgumentException("Unsupported cache type: " + cache.getClass().getSimpleName());
+            }
         }
 
     }

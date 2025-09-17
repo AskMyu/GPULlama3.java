@@ -17,10 +17,12 @@ import org.beehive.gpullama3.model.format.ChatFormat;
 import org.beehive.gpullama3.model.phi3.Phi3;
 import org.beehive.gpullama3.model.phi3.Phi3Configuration;
 import org.beehive.gpullama3.tokenizer.impl.Phi3Tokenizer;
+import org.beehive.gpullama3.tokenizer.impl.GemmaTokenizer;
 import org.beehive.gpullama3.tokenizer.impl.Tokenizer;
 import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
 import org.beehive.gpullama3.tornadovm.TornadoVMMasterPlan;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -39,6 +41,8 @@ public class Phi3ModelLoader extends ModelLoader {
             final String modelPrefix = "phi3.";
 
             Vocabulary vocabulary = Vocabulary.loadPhi3Vocabulary(metadata);
+            
+            // Use Phi3Tokenizer - Phi-4 Mini should be compatible with Phi3 tokenizer
             Tokenizer tokenizer = new Phi3Tokenizer(metadata, vocabulary);
 
             System.out.println("Tokenizer: " + tokenizer.getClass().getSimpleName());
@@ -95,8 +99,23 @@ public class Phi3ModelLoader extends ModelLoader {
                 8, 1, 3, 8192         // Additional RoPE parameters from reference
         );
 
+        // Debug tensor loading for troubleshooting
+        // System.out.println("DEBUG: Available tensor names:");
+        // tensorEntries.keySet().stream().sorted().forEach(name -> System.out.println("  " + name));
+        
         GGMLTensorEntry tokenEmbeddings = tensorEntries.get("token_embd.weight");
         GGMLTensorEntry outputWeight = tensorEntries.get("output.weight"); // Phi3 always has separate output weight
+        
+        if (outputWeight == null) {
+            // Try alternative names for Phi-4 Mini
+            outputWeight = tensorEntries.get("lm_head.weight");
+            if (outputWeight != null) {
+                // Use lm_head.weight as output weight
+            } else {
+                // Phi-4 Mini uses tied embeddings - share token embeddings for output
+                outputWeight = tokenEmbeddings;
+            }
+        }
 
         if (useTornadovm) {
             if (TornadoVMMasterPlan.ENABLE_TORNADOVM_INIT_TIME) {

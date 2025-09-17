@@ -18,7 +18,7 @@ public enum GGMLType {
     Q4_K(2 * GGMLType.FLOAT16_BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 2, GGMLType.QK_K),
     Q5_K(2 * GGMLType.FLOAT16_BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 8 + GGMLType.QK_K / 2, GGMLType.QK_K),
     Q6_K(GGMLType.QK_K / 2 + GGMLType.QK_K / 4 + GGMLType.QK_K / 16 + GGMLType.FLOAT16_BYTES, GGMLType.QK_K),
-    Q8_K(Integer.MAX_VALUE),
+    Q8_K(4 + GGMLType.QK_K + (GGMLType.QK_K / 16) * 2, GGMLType.QK_K), // float d + int8[QK_K] + int16[QK_K/16]
 
     IQ2_XXS(Integer.MAX_VALUE),
     IQ2_XS(Integer.MAX_VALUE),

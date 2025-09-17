@@ -51,6 +51,12 @@ public record Vocabulary(String[] tokens, float[] scores, Map<String, Integer> t
         return new Vocabulary(tokens, scores);
     }
 
+    public static Vocabulary loadOlmoeVocabulary(Map<String, Object> metadata) {
+        String[] tokens = (String[]) metadata.get("tokenizer.ggml.tokens");
+        float[] scores = (float[]) metadata.get("tokenizer.ggml.scores");
+        return new Vocabulary(tokens, scores);
+    }
+
     public int size() {
         return tokens.length;
     }

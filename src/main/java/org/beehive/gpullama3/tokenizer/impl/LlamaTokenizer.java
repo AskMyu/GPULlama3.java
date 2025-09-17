@@ -59,12 +59,24 @@ public class LlamaTokenizer implements Tokenizer {
     public LlamaTokenizer(Map<String, Object> metadata, Vocabulary vocabulary) {
         // load from metadata
         String[] mergeLines = (String[]) metadata.get("tokenizer.ggml.merges");
-        List<Pair<Integer, Integer>> merges = Arrays.stream(mergeLines).map(line -> line.split(" "))
-                .map(parts -> new Pair<>(vocabulary.getIndex(parts[0]).orElseThrow(), vocabulary.getIndex(parts[1]).orElseThrow())).toList();
+        List<Pair<Integer, Integer>> merges;
+        
+        if (mergeLines != null) {
+            merges = Arrays.stream(mergeLines).map(line -> line.split(" "))
+                    .map(parts -> new Pair<>(vocabulary.getIndex(parts[0]).orElseThrow(), vocabulary.getIndex(parts[1]).orElseThrow())).toList();
+        } else {
+            // Some models (like LLaVA-1.5) don't have merges in metadata
+            System.out.println("DEBUG: No tokenizer.ggml.merges found, using empty merges list");
+            merges = new ArrayList<>();
+        }
         int allTokens = vocabulary.size();
-        int baseTokens = 128000; // assume all tokens after the base ones are special.
+        int baseTokens = Math.min(128000, allTokens); // assume all tokens after the base ones are special, but don't exceed actual vocab size
         int reservedSpecialTokens = allTokens - baseTokens;
-        List<String> specialTokensList = Arrays.stream(vocabulary.tokens(), baseTokens, allTokens).toList();
+        List<String> specialTokensList = (reservedSpecialTokens > 0) ? 
+            Arrays.stream(vocabulary.tokens(), baseTokens, allTokens).toList() :
+            new ArrayList<>(); // No special tokens if baseTokens >= allTokens
+        
+        System.out.println("DEBUG: Vocabulary info - allTokens: " + allTokens + ", baseTokens: " + baseTokens + ", specialTokens: " + reservedSpecialTokens);
 
         assert specialTokensList.stream().allMatch(token -> vocabulary.getIndex(token).isPresent());
 
@@ -167,8 +179,31 @@ public class LlamaTokenizer implements Tokenizer {
         // let's begin. first, convert all bytes to integers in range 0..255
         List<Integer> ids = new ArrayList<>();
         for (int b : chunk.toCharArray()) {
-            int tokenIndex = this.vocabulary.getIndex(String.valueOf((char) b)).orElseThrow();
-            ids.add(tokenIndex);
+            String charStr = String.valueOf((char) b);
+            var tokenIndex = this.vocabulary.getIndex(charStr);
+            if (tokenIndex.isPresent()) {
+                ids.add(tokenIndex.getAsInt());
+            } else {
+                // Handle unknown character: try fallback strategies
+                // Strategy 1: Use UTF-8 byte encoding
+                try {
+                    byte[] bytes = charStr.getBytes("UTF-8");
+                    for (byte byteVal : bytes) {
+                        int unsignedByte = byteVal & 0xFF;
+                        var byteTokenIndex = this.vocabulary.getIndex(String.valueOf(unsignedByte));
+                        if (byteTokenIndex.isPresent()) {
+                            ids.add(byteTokenIndex.getAsInt());
+                        } else {
+                            // Strategy 2: Use unknown token (ID 0) or space token as fallback
+                            var spaceToken = this.vocabulary.getIndex(" ");
+                            ids.add(spaceToken.orElse(0)); // Use 0 as ultimate fallback
+                        }
+                    }
+                } catch (Exception e) {
+                    // Ultimate fallback: use unknown token
+                    ids.add(0);
+                }
+            }
         }
 
         while (ids.size() >= 2) {
@@ -209,6 +244,15 @@ public class LlamaTokenizer implements Tokenizer {
         StringBuilder sb = new StringBuilder();
         for (int token : tokens) {
             String tokenString = vocabulary.get(token);
+            if (tokenString == null) {
+                // Handle out-of-vocabulary tokens
+                System.err.printf("[TOKENIZER] Warning: Token %d not found in vocabulary (vocab size: %d), using <UNK>%n", 
+                                 token, vocabulary.size());
+                tokenString = "<UNK>"; // Use unknown token placeholder
+            } else {
+                System.err.printf("[TOKENIZER-DEBUG] Token %d -> '%s' (length=%d)%n", 
+                                 token, tokenString.replace("\n", "\\n").replace("\r", "\\r"), tokenString.length());
+            }
             sb.append(tokenString);
         }
         return sb.toString();
@@ -267,12 +311,30 @@ public class LlamaTokenizer implements Tokenizer {
 
     @Override
     public String decode(List<Integer> tokens) {
+        System.err.printf("[TOKENIZER-DECODE] Decoding %d tokens: %s%n", tokens.size(), tokens.toString());
         String decoded = decodeImpl(tokens);
-        int[] decodedBytesAsInts = decoded.codePoints().map(BYTE_DECODER::get).toArray();
+        System.err.printf("[TOKENIZER-DECODE] Intermediate decoded string: '%s' (length=%d)%n", 
+                         decoded.replace("\n", "\\n").replace("\r", "\\r"), decoded.length());
+        
+        int[] decodedBytesAsInts = decoded.codePoints()
+            .map(codePoint -> {
+                Integer byteValue = BYTE_DECODER.get(codePoint);
+                if (byteValue == null) {
+                    System.err.printf("[TOKENIZER] Warning: Unknown code point %d, using replacement character%n", codePoint);
+                    return 0xFFFD; // Unicode replacement character
+                }
+                return byteValue;
+            })
+            .toArray();
+        
+        System.err.printf("[TOKENIZER-DECODE] Decoded bytes array length: %d%n", decodedBytesAsInts.length);
         byte[] rawBytes = new byte[decodedBytesAsInts.length];
-        for (int i = 0; i < decoded.length(); i++) {
+        for (int i = 0; i < decodedBytesAsInts.length; i++) {
             rawBytes[i] = (byte) decodedBytesAsInts[i];
         }
-        return new String(rawBytes, StandardCharsets.UTF_8);
+        String finalResult = new String(rawBytes, StandardCharsets.UTF_8);
+        System.err.printf("[TOKENIZER-DECODE] Final result: '%s' (length=%d)%n", 
+                         finalResult.replace("\n", "\\n").replace("\r", "\\r"), finalResult.length());
+        return finalResult;
     }
 }

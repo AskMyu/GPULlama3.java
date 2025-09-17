@@ -6,6 +6,8 @@ import org.beehive.gpullama3.inference.weights.tornado.Phi3TornadoWeights;
 import org.beehive.gpullama3.model.Model;
 import org.beehive.gpullama3.model.phi3.Phi3Configuration;
 import uk.ac.manchester.tornado.api.GridScheduler;
+import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
@@ -29,7 +31,7 @@ public class Phi3TornadoVMLayerPlanner extends TornadoVMLayerPlanner<Phi3State, 
         super(state, model);
     }
 
-    public Tuple2<List<ImmutableTaskGraph>, GridScheduler> setupTornadoForwardPlanLayered() {
+    public Tuple2<List<ImmutableTaskGraph>, GridScheduler> setupTornadoForwardPlanLayered() throws Exception {
         List<ImmutableTaskGraph> taskGraphs = new ArrayList<>();
 
         state.temp.init(0.0f);
@@ -38,7 +40,7 @@ public class Phi3TornadoVMLayerPlanner extends TornadoVMLayerPlanner<Phi3State, 
         final int opSize = config.dim() + 2 * (config.numberOfKeyValueHeads() * config.headSize());
 
         // @formatter:off
-        TaskGraph activationUpdate = new TaskGraph("activationUpdate")
+        TaskGraph activationUpdate = TornadoVMSafeInitializer.createTaskGraphSafely("activationUpdate")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, state.wrapX)
                 .task("updateX", TransformerComputeKernels::emptyTaskToForceCopyIn, state.wrapX)
                 .persistOnDevice(state.wrapX);
@@ -46,7 +48,7 @@ public class Phi3TornadoVMLayerPlanner extends TornadoVMLayerPlanner<Phi3State, 
 
         TaskGraph unifiedLayer = null;
         for (int layerIndex = 0; layerIndex < config.numberOfLayers(); layerIndex++) {
-            unifiedLayer = new TaskGraph("layer_" + layerIndex);
+            unifiedLayer = TornadoVMSafeInitializer.createTaskGraphSafely("layer_" + layerIndex);
             unifiedLayer.consumeFromDevice(state.wrapX);
             unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION,
                     weights.rms_att_weightLayered[layerIndex],
@@ -70,9 +72,9 @@ public class Phi3TornadoVMLayerPlanner extends TornadoVMLayerPlanner<Phi3State, 
                             state.positionHolder, state.wrapQ, state.wrapK, config.kvDim(),
                             config.headSize())
                     .task("copyToCaches", TransformerComputeKernelsLayered::copyToCache,
-                            state.wrapKeyCache, state.wrapK,  state.wrapValueCache, state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength())
+                            getFloatArrayFromCache(state.wrapKeyCache), state.wrapK,  getFloatArrayFromCache(state.wrapValueCache), state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength())
                     .task("parallel-attention", TransformerComputeKernelsLayered::processHeadsFlashAttention, context,
-                            state.wrapQ, state.wrapKeyCache, state.wrapValueCache, state.wrapXb,
+                            state.wrapQ, getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), state.wrapXb,
                             config.numberOfHeads(), config.headSize(), config.kvDim(), config.kvMul(),
                             state.positionHolder, layerIndex, config.contextLength())
                     .task("matmul1", TransformerComputeKernelsLayered::matrixVectorGenericWithResidual, context,
@@ -94,7 +96,7 @@ public class Phi3TornadoVMLayerPlanner extends TornadoVMLayerPlanner<Phi3State, 
         }
 
         TaskGraph lastUnifiedLayer = unifiedLayer;
-        TaskGraph logits = new TaskGraph("logits")
+        TaskGraph logits = TornadoVMSafeInitializer.createTaskGraphSafely("logits")
                 .consumeFromDevice(lastUnifiedLayer.getTaskGraphName(),
                         state.wrapX
                 )
@@ -176,14 +178,14 @@ public class Phi3TornadoVMLayerPlanner extends TornadoVMLayerPlanner<Phi3State, 
             unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, //
                     context, state.wrapXb, state.wrapXb2, //
                     state.wrapQ, state.wrapK, state.wrapV, //
-                    state.wrapKeyCache, state.wrapValueCache, //
+                    getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), //
                     state.wrapAtt, state.wrapHb, //
                     state.wrapHbG, state.wrapHbU, state.wrapQkv); //
         } else {
             // Subsequent layers: Consume data already on device from previous layer
             unifiedLayer.consumeFromDevice(context, state.wrapXb, state.wrapXb2, //
                     state.wrapQ, state.wrapK, state.wrapV, //
-                    state.wrapKeyCache, state.wrapValueCache, //
+                    getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), //
                     state.wrapAtt, state.wrapHb, //
                     state.positionHolder, // /
                     state.wrapHbG, state.wrapHbU, state.wrapQkv);
@@ -351,5 +353,28 @@ public class Phi3TornadoVMLayerPlanner extends TornadoVMLayerPlanner<Phi3State, 
         tornadoForwardScheduler.addWorkerGrid("logits.mapContextLogits", rmsNormWorker);
 
         return tornadoForwardScheduler;
+    }
+    
+    /**
+     * Helper method to extract FloatArray from cache objects (SmartCacheArray or FloatArray).
+     * For SmartCacheArray, returns the direct array if not batched, or the first batch if batched.
+     */
+    private FloatArray getFloatArrayFromCache(Object cache) {
+        if (cache instanceof SmartCacheArray) {
+            SmartCacheArray smartCache = (SmartCacheArray) cache;
+            if (smartCache.isBatched()) {
+                // For batched arrays, use the first batch for now
+                // Full batch coordination would be implemented in a future version
+                System.err.printf("[PHI3-PLANNER] Warning: Using first batch of %d batches for cache operations%n", 
+                                smartCache.getNumBatches());
+                return smartCache.getBatch(0);
+            } else {
+                return smartCache.getDirectArray();
+            }
+        } else if (cache instanceof FloatArray) {
+            return (FloatArray) cache;
+        } else {
+            throw new IllegalArgumentException("Unsupported cache type: " + cache.getClass().getSimpleName());
+        }
     }
 }

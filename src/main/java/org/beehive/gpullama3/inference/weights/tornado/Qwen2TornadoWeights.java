@@ -2,6 +2,7 @@ package org.beehive.gpullama3.inference.weights.tornado;
 
 import org.beehive.gpullama3.core.model.GGMLType;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 
 public class Qwen2TornadoWeights extends TornadoWeights {

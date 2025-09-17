@@ -91,13 +91,24 @@ public class Phi3Tokenizer implements Tokenizer {
 
     @Override
     public List<Integer> encodeAsList(String pText) {
-        String text = pText.replace(" ", SPM_UNDERSCORE);
-        text = text.startsWith(SPM_UNDERSCORE) ? text : SPM_UNDERSCORE + text;
+        // Check if this is a Phi-4 model (vocabulary size > 100000 indicates GPT-2 style tokenizer)
+        boolean isGPT2Style = vocabulary.size() > 100000;
+        
+        String text;
+        if (isGPT2Style) {
+            // Phi-4 uses GPT-2 style tokenization - no SentencePiece underscore prefix
+            text = pText;
+        } else {
+            // Phi-3 uses SentencePiece - add underscore prefix
+            text = pText.replace(" ", SPM_UNDERSCORE);
+            text = text.startsWith(SPM_UNDERSCORE) ? text : SPM_UNDERSCORE + text;
+        }
+        
         final int textLen = text.length();
-
         final List<Integer> tokens = new ArrayList<>();
         final int vocSize = vocabulary.size();
         int offset = 0;
+        
         while (offset < textLen) {
             String curVoc = null;
             int token = -1;
@@ -121,7 +132,20 @@ public class Phi3Tokenizer implements Tokenizer {
                         }
                     }
                     if (token == -1) {
-                        throw new RuntimeException(String.format("Can't tokenize text at offset %d (%c / (%d, sHex %s)), tokens = %s, text: %s", offset, text.charAt(offset), i, sHex, tokens, text));
+                        // For GPT-2 style tokenizers, try to find a fallback token
+                        if (isGPT2Style) {
+                            // Look for unknown token
+                            for (int j = 0; j < vocSize; j++) {
+                                String vocToken = vocabulary.get(j);
+                                if (vocToken.equals("<|unknown|>") || vocToken.equals("<unk>") || vocToken.equals("�")) {
+                                    token = j;
+                                    break;
+                                }
+                            }
+                        }
+                        if (token == -1) {
+                            throw new RuntimeException(String.format("Can't tokenize text at offset %d (%c / (%d, sHex %s)), tokens = %s, text: %s", offset, text.charAt(offset), i, sHex, tokens, text));
+                        }
                     }
                     tokens.add(token);
                 }
@@ -136,6 +160,9 @@ public class Phi3Tokenizer implements Tokenizer {
 
     @Override
     public String decode(List<Integer> tokens) {
+        // Check if this is a Phi-4 model (vocabulary size > 100000 indicates GPT-2 style tokenizer)
+        boolean isGPT2Style = vocabulary.size() > 100000;
+        
         StringBuilder sb = new StringBuilder();
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
@@ -164,7 +191,12 @@ public class Phi3Tokenizer implements Tokenizer {
             sb.append(new String(baos.toByteArray(), StandardCharsets.UTF_8));
         }
 
-        // Replace SPM underscore with space
-        return sb.toString().replace(SPM_UNDERSCORE, " ");
+        if (isGPT2Style) {
+            // Phi-4 uses GPT-2 style - no SentencePiece underscore replacement needed
+            return sb.toString();
+        } else {
+            // Phi-3 uses SentencePiece - replace SPM underscore with space
+            return sb.toString().replace(SPM_UNDERSCORE, " ");
+        }
     }
 }
