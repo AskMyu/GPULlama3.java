@@ -68,3 +68,11 @@ logs/target/
 .vscode/
 external/tornadovm
 !dependencies/*.jar
+
+# gradle stuff
+.gradle/
+build/
+dist/
+!gradle/wrapper/gradle-wrapper.jar
+gradle-app.setting
+.gradletasknamecache
