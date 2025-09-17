@@ -67,3 +67,4 @@ logs/target/
 .classpath
 .vscode/
 external/tornadovm
+!dependencies/*.jar
