@@ -517,11 +517,24 @@ public final class Llava implements Model {
                 System.err.println("[VLM-DEBUG] Added begin_of_text token");
             }
             
-            System.err.println("[VLM-DEBUG] Step 2: Creating simple prompt...");
-            // Create standard LLaVA-1.5 prompt format: "USER: [prompt] ASSISTANT:"
-            // Based on official LLaVA conversation template
-            String simplePrompt = "USER: " + (textPrompt != null ? textPrompt : "What do you see?") + " ASSISTANT:";
-            System.err.println("[VLM-DEBUG] Simple prompt created: '" + simplePrompt + "'");
+            System.err.println("[VLM-DEBUG] Step 2: Creating prompt with model-specific format...");
+
+            // Detect model type and use appropriate conversation format
+            String simplePrompt;
+            boolean hasLlama3ChatTemplate = tokenizer().getSpecialTokens().containsKey("<|start_header_id|>");
+
+            if (hasLlama3ChatTemplate) {
+                // LLaVA-Llama3-8B format: <|start_header_id|>user<|end_header_id|>\n\n[content]<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n
+                System.err.println("[VLM-DEBUG] Detected Llama3 model - using Llama3 chat template");
+                simplePrompt = "<|start_header_id|>user<|end_header_id|>\n\n" +
+                              (textPrompt != null ? textPrompt : "What do you see?") +
+                              "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+            } else {
+                // LLaVA-1.5 format: "USER: [prompt] ASSISTANT:"
+                System.err.println("[VLM-DEBUG] Detected LLaVA-1.5 model - using standard format");
+                simplePrompt = "USER: " + (textPrompt != null ? textPrompt : "What do you see?") + " ASSISTANT:";
+            }
+            System.err.println("[VLM-DEBUG] Model-specific prompt created: '" + simplePrompt + "'");
             
             System.err.println("[VLM-DEBUG] Step 3: About to call tokenizer.encode() - THIS IS WHERE IT MIGHT HANG");
             
