@@ -243,9 +243,13 @@ public abstract class ModelLoader {
         FileChannel fileChannel = FileChannel.open(ggufPath, StandardOpenOption.READ);
         // detect model type
         ModelType modelType = detectModelType(gguf.getMetadata(), ggufPath);
-        
-        // model type-specific load
-        return modelType.loadModel(fileChannel, gguf, contextLength, loadWeights, useTornadovm);
+
+        // model type-specific load - pass model path for VLM models
+        if (modelType.isVisionLanguageModel()) {
+            return modelType.loadModel(fileChannel, gguf, contextLength, loadWeights, useTornadovm, ggufPath.toString());
+        } else {
+            return modelType.loadModel(fileChannel, gguf, contextLength, loadWeights, useTornadovm);
+        }
     }
 
     public static FloatTensor loadQuantized(GGMLTensorEntry entry) {

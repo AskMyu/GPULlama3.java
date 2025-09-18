@@ -516,11 +516,35 @@ public final class InferenceEngine {
         long startNanos = System.nanoTime();
         long inferenceStartNanos = 0;
 
+        // Debug logging for VLM calls
+        boolean isVLM = state.getClass().getSimpleName().contains("VLM");
+        if (isVLM) {
+            System.err.println("[GPU-DEBUG] ========== GENERATE TOKENS GPU LLAMA START ==========");
+            System.err.println("[GPU-DEBUG] Model: " + model.getClass().getSimpleName());
+            System.err.println("[GPU-DEBUG] State: " + state.getClass().getSimpleName());
+            System.err.println("[GPU-DEBUG] Start position: " + startPosition);
+            System.err.println("[GPU-DEBUG] Prompt tokens: " + promptTokens);
+            System.err.println("[GPU-DEBUG] Max tokens: " + maxTokens);
+            System.err.println("[GPU-DEBUG] Context length: " + model.configuration().contextLength());
+            System.err.println("[GPU-DEBUG] SUCCESSFULLY ENTERED generateTokensGPULlama!");
+        }
+
         // Pre-validate the max tokens to avoid checking in the loop
+        // CRITICAL FIX: For VLM models, maxTokens represents maximum NEW tokens to generate
+        // We need to convert this to absolute position by adding startPosition + prompt length
+        if (isVLM && maxTokens > 0) {
+            int originalMaxTokens = maxTokens;
+            maxTokens = startPosition + promptTokens.size() + maxTokens;
+            if (isVLM) {
+                System.err.println("[GPU-DEBUG] FIXED: Converted maxTokens from " + originalMaxTokens + " to " + maxTokens + " (startPos + promptLen + newTokens = " + startPosition + " + " + promptTokens.size() + " + " + originalMaxTokens + ")");
+            }
+        }
         int actualMaxTokens = Math.min(maxTokens > 0 ? maxTokens : model.configuration().contextLength(), model.configuration().contextLength());
 
         // Preallocate with expected capacity to avoid resizing
-        List<Integer> generatedTokens = new ArrayList<>(Math.min(256, actualMaxTokens - promptTokens.size())); // Conservative estimate
+        int remainingTokens = actualMaxTokens - promptTokens.size();
+        int estimatedCapacity = Math.max(1, Math.min(256, remainingTokens)); // Ensure positive capacity
+        List<Integer> generatedTokens = new ArrayList<>(estimatedCapacity);
 
         // === Token Generation Loop ===
         int currentToken = state.latestToken;

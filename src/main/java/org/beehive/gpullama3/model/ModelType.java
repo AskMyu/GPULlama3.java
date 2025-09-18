@@ -126,12 +126,22 @@ public enum ModelType {
         public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
             return new LlavaModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
         }
+
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm, String modelPath) {
+            return new LlavaModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm, modelPath).loadModel();
+        }
     },
 
     LLAVA_LLAMA_3_8B_INT4 {
         @Override
         public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
             return new LlavaModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm, String modelPath) {
+            return new LlavaModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm, modelPath).loadModel();
         }
     },
 
@@ -144,6 +154,12 @@ public enum ModelType {
 
     // Abstract method that each enum constant must implement
     public abstract Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm);
+
+    // Overloaded method for VLM models that need model path information
+    public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm, String modelPath) {
+        // Default implementation for non-VLM models - ignore model path
+        return loadModel(fileChannel, gguf, contextLength, loadWeights, useTornadovm);
+    }
 
     public boolean isDeepSeekR1() {
         return this == DEEPSEEK_R1_DISTILL_QWEN || this == DEEPSEEK_R1_DISTILL_QWEN_1_5B;

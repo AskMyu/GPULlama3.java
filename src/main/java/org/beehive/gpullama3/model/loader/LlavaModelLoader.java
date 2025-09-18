@@ -35,6 +35,11 @@ public class LlavaModelLoader extends ModelLoader {
         super(fileChannel, gguf, contextLength, loadWeights, useTornadovm);
     }
 
+    public LlavaModelLoader(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm, String modelPath) {
+        super(fileChannel, gguf, contextLength, loadWeights, useTornadovm);
+        this.modelPath = modelPath;
+    }
+
     @Override
     public Model loadModel() {
         try {
@@ -156,30 +161,14 @@ public class LlavaModelLoader extends ModelLoader {
         String modelName = (String) metadata.getOrDefault("general.name", "llava-llama-3-8b");
         String filename = null;
         
-        // Try to get the model path from various sources
+        // Use the modelPath stored during construction
         if (this.modelPath != null) {
             filename = this.modelPath;
+            System.out.println("DEBUG: Using stored model path: " + filename);
         } else {
-            // Try to extract from FileChannel path
-            try {
-                if (fileChannel instanceof java.nio.channels.FileChannel) {
-                    java.lang.reflect.Method method = fileChannel.getClass().getDeclaredMethod("path");
-                    method.setAccessible(true);
-                    java.nio.file.Path path = (java.nio.file.Path) method.invoke(fileChannel);
-                    if (path != null) {
-                        filename = path.toString();
-                        System.out.println("DEBUG: Extracted filename from FileChannel: " + filename);
-                    }
-                }
-            } catch (Exception e) {
-                System.err.println("DEBUG: Could not extract path from FileChannel: " + e.getMessage());
-            }
-
-            // Final fallback
-            if (filename == null) {
-                filename = "models/vlm/llava-1.5-7b-gguf/llava-v1.5-7b-Q4_K_M.gguf"; // Default to LLaVA-1.5
-                System.out.println("DEBUG: Using default filename: " + filename);
-            }
+            // Final fallback - throw an error instead of using wrong model
+            throw new RuntimeException("Model path not set in LlavaModelLoader constructor. " +
+                "This would cause loading the wrong model. Use the overloaded constructor that accepts modelPath.");
         }
         
         // For LLaVA-1.5, general.name is "LLaMA v2" which isn't helpful, use filename instead

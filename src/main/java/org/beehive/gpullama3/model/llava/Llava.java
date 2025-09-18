@@ -180,11 +180,24 @@ public final class Llava implements Model {
                                                   Set<Integer> stopTokens, int maxTokens, Sampler sampler,
                                                   boolean echo, IntConsumer onTokenGenerated, Options options) {
         // TornadoVM plan should already be initialized early in generateTokensMultimodal()
-        // No need to initialize here as it would be too late (after vision processing)
+        System.err.println("[ROUTE-DEBUG] generateTokensWithOptions called:");
+        System.err.println("[ROUTE-DEBUG]   options: " + options);
+        System.err.println("[ROUTE-DEBUG]   startPosition: " + startPosition);
+        System.err.println("[ROUTE-DEBUG]   promptTokens size: " + promptTokens.size());
+        System.err.println("[ROUTE-DEBUG]   tornadoVMPlan: " + this.tornadoVMPlan);
 
-        // LLaVA uses Llama as its language backbone, so delegate to Llama CPU generation
-        return InferenceEngine.generateTokensLlama(this, state, startPosition, promptTokens,
-                                                  stopTokens, maxTokens, sampler, echo, onTokenGenerated);
+        // Check if TornadoVM is enabled and route accordingly
+        if (options != null && options.useTornadovm() && this.tornadoVMPlan != null) {
+            // GPU path using TornadoVM
+            System.err.println("[ROUTE-DEBUG] Taking GPU path: InferenceEngine.generateTokensGPULlama");
+            return InferenceEngine.generateTokensGPULlama(this, state, startPosition, promptTokens,
+                                                         stopTokens, maxTokens, sampler, echo, onTokenGenerated, this.tornadoVMPlan);
+        } else {
+            // CPU path - LLaVA uses Llama as its language backbone
+            System.err.println("[ROUTE-DEBUG] Taking CPU path: InferenceEngine.generateTokensLlama");
+            return InferenceEngine.generateTokensLlama(this, state, startPosition, promptTokens,
+                                                      stopTokens, maxTokens, sampler, echo, onTokenGenerated);
+        }
     }
     
     @Override
@@ -234,48 +247,20 @@ public final class Llava implements Model {
         // ===== TORNADOVM INITIALIZATION =====
         boolean shouldUseTornadoVM = useGPUAcceleration && options.useTornadovm();
 
-        // Initialize TornadoVM plan if enabled
-        if (shouldUseTornadoVM && tornadoVMPlan == null) {
-            System.err.println("[LLAVA-MEMORY] Initializing TornadoVM plan for GPU acceleration...");
-
-            // Force GPU memory cleanup before TornadoVM initialization
-            forceGPUMemoryCleanup();
-
-            try {
-                System.err.println("[LLAVA-MEMORY] Attempting TornadoVM plan initialization...");
-                tornadoVMPlan = TornadoVMMasterPlan.initializeTornadoVMPlan(vlmState, this);
-
-                if (tornadoVMPlan != null) {
-                    System.err.println("[LLAVA-MEMORY] ✅ TornadoVM plan initialized successfully");
-                } else {
-                    System.err.println("[LLAVA-MEMORY] ❌ TornadoVM plan initialization returned null");
-                    shouldUseTornadoVM = false; // Disable TornadoVM if plan failed to initialize
-                }
-            } catch (Exception e) {
-                System.err.printf("[LLAVA-MEMORY] ❌ TornadoVM plan initialization failed: %s%n", e.getMessage());
-                shouldUseTornadoVM = false; // Disable TornadoVM if initialization fails
-                tornadoVMPlan = null;
-                e.printStackTrace();
-            }
-        }
+        // DEFERRED: TornadoVM initialization moved after vision processing to avoid execution plan conflicts
 
         // ===== CRITICAL: WEIGHT/PROCESSING MODE CONSISTENCY CHECK =====
         // Ensure weights type matches processing mode - prevent inconsistent states
         boolean hasGPUWeights = (this.weights() instanceof org.beehive.gpullama3.inference.weights.tornado.TornadoWeights);
-        boolean hasValidTornadoPlan = (tornadoVMPlan != null);
+        // Note: TornadoVM plan validation deferred until after vision processing
 
         System.err.printf("[LLAVA-MEMORY] ===== CONSISTENCY CHECK =====\n");
         System.err.printf("[LLAVA-MEMORY] GPU Weights loaded: %s\n", hasGPUWeights);
-        System.err.printf("[LLAVA-MEMORY] TornadoVM plan valid: %s\n", hasValidTornadoPlan);
+        System.err.printf("[LLAVA-MEMORY] TornadoVM plan: Deferred until after vision processing\n");
         System.err.printf("[LLAVA-MEMORY] shouldUseTornadoVM: %s\n", shouldUseTornadoVM);
 
-        if (hasGPUWeights && !hasValidTornadoPlan) {
-            System.err.println("[LLAVA-MEMORY] ❌ CRITICAL: TornadoWeights loaded but no valid TornadoVM plan!");
-            System.err.println("[LLAVA-MEMORY] This indicates insufficient GPU memory for full model allocation.");
-            System.err.println("[LLAVA-MEMORY] Recommendation: Increase tornado.device.memory or use a smaller model.");
-            throw new RuntimeException("Inconsistent state: TornadoWeights without valid TornadoVM execution plan. " +
-                                     "GPU memory insufficient for model size. Try increasing -Dtornado.device.memory=<X>GB");
-        } else if (!hasGPUWeights && shouldUseTornadoVM) {
+        // TornadoVM plan validation deferred until after vision processing
+        if (!hasGPUWeights && shouldUseTornadoVM) {
             System.err.println("[LLAVA-MEMORY] ⚠️ Warning: TornadoVM requested but StandardWeights loaded - using CPU processing");
             shouldUseTornadoVM = false;
         }
@@ -303,7 +288,7 @@ public final class Llava implements Model {
                 };
             }
             
-            return generateTokens(vlmState, 0, textTokens, stopTokens, maxNewTokens, sampler, options.echo(), tokenConsumer);
+            return generateTokens(vlmState, vlmState.getTextStartPosition(), textTokens, stopTokens, maxNewTokens, sampler, options.echo(), tokenConsumer);
         }
         
         try {
@@ -342,7 +327,36 @@ public final class Llava implements Model {
                     }
                 };
             }
-            
+
+            // === TornadoVM Initialization AFTER Vision Processing ===
+            // Initialize TornadoVM plan for text generation after vision processing completes
+            // This isolation prevents execution plan conflicts between vision and text processing
+            TornadoVMMasterPlan tornadoVMPlan = null;
+            if (shouldUseTornadoVM) {
+                System.err.println("[LLAVA-ISOLATION] Initializing TornadoVM for text generation (post-vision)...");
+
+                // Force GPU memory cleanup after vision processing
+                forceGPUMemoryCleanup();
+
+                try {
+                    System.err.println("[LLAVA-ISOLATION] Creating isolated TornadoVM execution plan...");
+                    tornadoVMPlan = TornadoVMMasterPlan.initializeTornadoVMPlan(vlmState, this);
+
+                    if (tornadoVMPlan != null) {
+                        System.err.println("[LLAVA-ISOLATION] ✅ Text generation TornadoVM plan created successfully");
+                        this.tornadoVMPlan = tornadoVMPlan;
+                    } else {
+                        System.err.println("[LLAVA-ISOLATION] ❌ TornadoVM plan creation failed, using CPU");
+                        shouldUseTornadoVM = false;
+                    }
+                } catch (Exception e) {
+                    System.err.printf("[LLAVA-ISOLATION] ❌ TornadoVM initialization failed: %s%n", e.getMessage());
+                    shouldUseTornadoVM = false;
+                    tornadoVMPlan = null;
+                    e.printStackTrace();
+                }
+            }
+
             // Generate response tokens using standard pipeline with streaming support
             System.err.println("[DEBUG] Starting VLM text generation with streaming...");
             System.err.println("[DEBUG] ===== CRITICAL HANG POINT INVESTIGATION =====");
@@ -385,7 +399,7 @@ public final class Llava implements Model {
                 };
             }
             
-            return generateTokens(vlmState, 0, textTokens, stopTokens, maxNewTokens, sampler, options.echo(), fallbackTokenConsumer);
+            return generateTokens(vlmState, vlmState.getTextStartPosition(), textTokens, stopTokens, maxNewTokens, sampler, options.echo(), fallbackTokenConsumer);
         }
     }
     
@@ -456,14 +470,23 @@ public final class Llava implements Model {
         System.err.println("✅ MLP projection completed: " + projectedFeatures.getSize() + " projected features");
         
         // Split projected features into individual vision token embeddings
-        int embeddingDim = config.dim(); // 4096 for Llama-3-8B
+        int embeddingDim = config.dim(); // Should be 2560 for this model
         // Calculate actual number of vision tokens from projectedFeatures (may be reduced by token reduction)
         int actualVisionTokens = projectedFeatures.getSize() / embeddingDim;
         System.err.println("[VLM-DEBUG] Actual vision tokens after reduction: " + actualVisionTokens);
-        
-        if (projectedFeatures.getSize() % embeddingDim != 0) {
-            throw new Exception(String.format("Vision projection size not aligned: size=%d, embeddingDim=%d", 
-                                            projectedFeatures.getSize(), embeddingDim));
+
+        // Handle slight misalignment from token reduction by truncating to whole tokens
+        int remainder = projectedFeatures.getSize() % embeddingDim;
+        if (remainder != 0) {
+            System.err.printf("[VLM-WARNING] Vision projection size misaligned by %d elements, truncating to %d complete tokens%n",
+                             remainder, actualVisionTokens);
+            // Truncate the projectedFeatures to contain only complete tokens
+            int alignedSize = actualVisionTokens * embeddingDim;
+            FloatArray alignedFeatures = new FloatArray(alignedSize);
+            for (int i = 0; i < alignedSize; i++) {
+                alignedFeatures.set(i, projectedFeatures.get(i));
+            }
+            projectedFeatures = alignedFeatures;
         }
         
         // Inject vision embeddings into VLM state starting at position 0
