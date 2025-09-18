@@ -19,12 +19,14 @@ import org.beehive.gpullama3.model.olmoe.OlmoeConfiguration;
 import org.beehive.gpullama3.tokenizer.impl.GemmaTokenizer;
 import org.beehive.gpullama3.tokenizer.impl.Tokenizer;
 import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
+import org.beehive.gpullama3.model.loader.batch.BatchCapableModelLoader;
 import org.beehive.gpullama3.tornadovm.TornadoVMMasterPlan;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
+import java.util.Arrays;
 import java.util.Map;
 
 import static org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary.loadOlmoeVocabulary;
@@ -35,10 +37,53 @@ import static org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary.loadOlmoeVoc
  * Handles loading of OLMoE-1B-7B and similar MoE models with
  * 64 experts and Top-8 routing.
  */
-public class OlmoeModelLoader extends ModelLoader {
+public class OlmoeModelLoader extends BatchCapableModelLoader {
+
+    // OLMoE expert tensor patterns - same as GPT-OSS
+    private static final String[] OLMOE_EXPERT_PATTERNS = {
+        "ffn_gate_exps", "ffn_down_exps", "ffn_up_exps"
+    };
 
     public OlmoeModelLoader(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
         super(fileChannel, gguf, contextLength, loadWeights, useTornadovm);
+    }
+
+    @Override
+    protected boolean requiresSpecialHandling(String tensorName) {
+        // OLMoE expert tensors require special handling
+        return Arrays.stream(OLMOE_EXPERT_PATTERNS)
+                    .anyMatch(tensorName::contains);
+    }
+
+    @Override
+    protected String[] getModelSpecificExpertPatterns() {
+        return OLMOE_EXPERT_PATTERNS;
+    }
+
+    @Override
+    protected Weights createWeightsFromTensors(Map<String, org.beehive.gpullama3.core.model.tensor.FloatTensor> tensors, Configuration config) {
+        // Use existing OLMoE weight creation logic
+        return createOlmoeWeights(tensors, config);
+    }
+
+    /**
+     * Creates OLMoE weights from loaded tensors using existing weight creation logic
+     */
+    private Weights createOlmoeWeights(Map<String, org.beehive.gpullama3.core.model.tensor.FloatTensor> loadedTensors, Configuration config) {
+        // Simple bridge: reload original tensor entries and use existing weight creation
+        // The BatchCapableModelLoader has already loaded the tensors into memory,
+        // so this just provides the metadata needed for the existing weight creation logic
+        try {
+            Map<String, GGMLTensorEntry> tensorEntries = GGUF.loadTensors(
+                fileChannel, gguf.getTensorDataOffset(), gguf.getTensorInfos());
+
+            System.err.printf("[OLMOE-BRIDGE] Loaded %d tensor entries for weight creation%n", tensorEntries.size());
+
+            // Use existing weight creation logic with all available tensors
+            return loadWeightsOlmoeOriginal(tensorEntries, config);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to reload tensor entries for OLMoE weight creation", e);
+        }
     }
 
     // @formatter:off
@@ -158,8 +203,7 @@ public class OlmoeModelLoader extends ModelLoader {
     }
 
     // @formatter:off
-    @Override
-    public Weights loadWeights(Map<String, GGMLTensorEntry> tensorEntries, Configuration config) {
+    public Weights loadWeightsOlmoeOriginal(Map<String, GGMLTensorEntry> tensorEntries, Configuration config) {
         Pair<float[], float[]> ropeFreqs = RoPE.precomputeFreqsCis(
                 config.contextLength(),
                 config.headSize(),

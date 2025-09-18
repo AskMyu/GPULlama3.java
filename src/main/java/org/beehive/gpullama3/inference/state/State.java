@@ -70,7 +70,7 @@ public abstract class State {
 
     protected State(Configuration config, int batchsize) {
         this.batchsize = -1;
-        this.latestToken = -1;
+        this.latestToken = 0;  // Initialize to valid token ID instead of -1
         this.localSize = 256;
 
         // Initialize all fields through the creation method

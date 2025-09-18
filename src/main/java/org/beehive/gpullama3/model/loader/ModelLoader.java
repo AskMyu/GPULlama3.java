@@ -261,6 +261,12 @@ public abstract class ModelLoader {
             case Q6_K -> new Q6_KFloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case Q8_K -> new Q8_KFloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case F16 -> new F16FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
+            case IQ3_T -> {
+                // IQ3_T: Native ternary quantization support
+                System.err.printf("[IQ3_T-NATIVE] Loading IQ3_T tensor '%s' with ternary decoding%n", entry.name());
+                yield new org.beehive.gpullama3.core.model.tensor.IQ3_TFloatTensor(
+                    FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
+            }
             default -> throw new UnsupportedOperationException("Quantization format " + ggmlType);
         };
     }
@@ -348,14 +354,9 @@ public abstract class ModelLoader {
         // Previous block that prevented >2GB allocations has been removed
         // TornadoVM FloatArray now supports large tensor allocations via integer overflow fix
 
-        // Safety check for extremely large tensors (secondary check)
-        long maxElementsPerTensor = 650_000_000L; // ~2.6GB at 4 bytes per element
-        if (tensorSize > maxElementsPerTensor) {
-            System.err.printf("[ALLOCATION-ERROR] Tensor '%s' size %d exceeds per-tensor limit %d%n", tensorName, tensorSize, maxElementsPerTensor);
-            System.err.printf("[ALLOCATION-ERROR] Memory required: %.2f GB (limit: %.2f GB)%n",
-                              tensorSize * 4.0 / (1024*1024*1024), maxElementsPerTensor * 4.0 / (1024*1024*1024));
-            throw new IllegalArgumentException("Tensor too large for allocation: " + tensorName + " (size: " + tensorSize + ")");
-        }
+        // Note: Artificial tensor size limit removed after FloatArrayLongFix implementation
+        // The TornadoVM framework now properly handles tensors >2GB with long arithmetic
+        // Previous limit of 650_000_000L (~2.6GB) is no longer needed
 
         System.err.printf("[TENSOR-LOAD] Loading tensor '%s' with size %d%n", tensorName, tensorSize);
         FloatArray array = new FloatArray(tensorSize);

@@ -82,8 +82,17 @@ public class GemmaTokenizer implements Tokenizer {
                 }
             } else {
                 // Regular word encoding
-                tokens.add(vocabulary.getIndex(word)
-                    .orElse(specialTokens.getOrDefault(UNK_TOKEN, 0)));
+                int tokenId = vocabulary.getIndex(word)
+                    .orElse(specialTokens.getOrDefault(UNK_TOKEN, 0));
+
+                System.err.printf("[OLMOE-TOKENIZE-DEBUG] Word: '%s' -> Token ID: %d%n", word, tokenId);
+
+                if (tokenId < 0) {
+                    System.err.printf("[OLMOE-TOKENIZE-ERROR] Negative token ID %d for word '%s'%n", tokenId, word);
+                    System.err.printf("[OLMOE-TOKENIZE-ERROR] UNK_TOKEN value: %s%n", specialTokens.get(UNK_TOKEN));
+                }
+
+                tokens.add(tokenId);
             }
         }
         

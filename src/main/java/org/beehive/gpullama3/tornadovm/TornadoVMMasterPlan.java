@@ -327,6 +327,39 @@ public class TornadoVMMasterPlan {
 
     /// Execute the forward pass of the LLaMA transformer model using TornadoVM acceleration just once to copy the data into the read-only data layer.
     public void forceCopyInReadOnlyDataLayered() {
+        // For large models, use batched approach to reduce memory pressure
+        int batchSize = calculateOptimalBatchSize();
+
+        if (batchSize >= config.numberOfLayers()) {
+            // Execute all layers at once for small models
+            forceCopyInReadOnlyDataLayeredAllAtOnce();
+        } else {
+            // Execute in batches for large models
+            forceCopyInReadOnlyDataLayeredInBatches(batchSize);
+        }
+    }
+
+    private int calculateOptimalBatchSize() {
+        // Calculate based on model size and available memory
+        // GPT-OSS 20B still fails with 530MB for 6 layers
+        // Need much more aggressive batching - try 2 layers at a time
+
+        int totalLayers = config.numberOfLayers();
+
+        if (totalLayers <= 4) {
+            return totalLayers; // Very small models: process all at once
+        } else if (totalLayers <= 8) {
+            return 4; // Small models: batch size 4
+        } else if (totalLayers <= 16) {
+            return 3; // Medium models: batch size 3
+        } else {
+            return 2; // Large models: batch size 2 (ultra-conservative for GPT-OSS)
+        }
+    }
+
+    private void forceCopyInReadOnlyDataLayeredAllAtOnce() {
+        System.err.println("[TORNADO-COPY] Processing all layers at once");
+
         // Execute all TornadoVM graphs
         state.wrapX.init(0.0f);
         state.positionHolder.init(0);
@@ -341,6 +374,150 @@ public class TornadoVMMasterPlan {
 
         // Execute logits graph
         executionPlan.withGraph(config.numberOfLayers() + 1).withGridScheduler(scheduler).execute();
+    }
+
+    private void forceCopyInReadOnlyDataLayeredInBatches(int batchSize) {
+        System.err.printf("[TORNADO-COPY] Processing %d layers in batches of %d%n", config.numberOfLayers(), batchSize);
+
+        // Initialize state once
+        state.wrapX.init(0.0f);
+        state.positionHolder.init(0);
+
+        // Execute activation update graph once
+        executionPlan.withGraph(0).withGridScheduler(scheduler).execute();
+
+        // Process layers in batches
+        for (int startLayer = 0; startLayer < config.numberOfLayers(); startLayer += batchSize) {
+            int endLayer = Math.min(startLayer + batchSize - 1, config.numberOfLayers() - 1);
+
+            System.err.printf("[TORNADO-COPY] Processing layer batch %d-%d (%d layers)%n",
+                            startLayer, endLayer, endLayer - startLayer + 1);
+
+            try {
+                // Execute this batch of layers
+                for (int layer = startLayer; layer <= endLayer; layer++) {
+                    executionPlan.withGraph(layer + 1).withGridScheduler(scheduler).execute();
+                }
+
+                // Aggressive memory cleanup between batches to reduce fragmentation
+                System.err.printf("[TORNADO-COPY] Performing memory cleanup after batch %d-%d%n", startLayer, endLayer);
+
+                // Multiple rounds of cleanup
+                for (int cleanup = 0; cleanup < 3; cleanup++) {
+                    System.gc(); // Suggest JVM cleanup
+                    System.runFinalization(); // Run finalizers
+                    try {
+                        Thread.sleep(50); // Longer pause to allow cleanup
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+
+                System.err.println("[TORNADO-COPY] Memory cleanup completed");
+
+            } catch (Exception e) {
+                System.err.printf("[TORNADO-COPY] ❌ Failed to process layer batch %d-%d: %s%n",
+                                startLayer, endLayer, e.getMessage());
+
+                // If batch failed and batch size > 1, try single layer processing
+                if (batchSize > 1 && (endLayer - startLayer + 1) > 1) {
+                    System.err.println("[TORNADO-COPY] Attempting single-layer fallback processing");
+                    forceCopyInReadOnlyDataLayeredSingleLayer();
+                    return;
+                }
+
+                throw new RuntimeException("TornadoVM layer batch processing failed", e);
+            }
+        }
+
+        // Execute logits graph once at the end
+        executionPlan.withGraph(config.numberOfLayers() + 1).withGridScheduler(scheduler).execute();
+
+        System.err.println("[TORNADO-COPY] ✅ Completed batched layer processing");
+    }
+
+    private void forceCopyInReadOnlyDataLayeredSingleLayer() {
+        System.err.printf("[TORNADO-COPY] ⚠️ FALLBACK: Processing %d layers one at a time (ultra-conservative mode)%n",
+                         config.numberOfLayers());
+        System.err.println("[TORNADO-COPY] ⚠️ WARNING: This mode is extremely slow but should handle memory pressure");
+
+        // Initialize state once
+        state.wrapX.init(0.0f);
+        state.positionHolder.init(0);
+
+        // Initial stabilization delay
+        try {
+            System.err.println("[TORNADO-COPY] Initial driver stabilization pause (1 second)");
+            Thread.sleep(1000);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+
+        // Execute activation update graph once
+        System.err.println("[TORNADO-COPY] Executing activation update graph");
+        executionPlan.withGraph(0).withGridScheduler(scheduler).execute();
+
+        // Process each layer individually with aggressive cleanup
+        for (int layer = 0; layer < config.numberOfLayers(); layer++) {
+            System.err.printf("[TORNADO-COPY] Processing single layer %d/%d%n",
+                            layer + 1, config.numberOfLayers());
+
+            // Pre-execution stabilization for problematic layers
+            if (layer > 4) {  // After layer 5 where crash occurred
+                try {
+                    System.err.printf("[TORNADO-COPY] Extra stabilization pause before layer %d (500ms)%n", layer);
+                    Thread.sleep(500);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            try {
+                // Execute single layer
+                executionPlan.withGraph(layer + 1).withGridScheduler(scheduler).execute();
+
+                // Ultra-aggressive memory cleanup after EACH layer
+                System.err.printf("[TORNADO-COPY] Memory cleanup after layer %d%n", layer);
+
+                // Even more aggressive cleanup for later layers
+                int cleanupRounds = (layer > 4) ? 8 : 5;  // More cleanup after problematic layer
+                int sleepTime = (layer > 4) ? 200 : 100;  // Longer pauses after problematic layer
+
+                for (int cleanup = 0; cleanup < cleanupRounds; cleanup++) {
+                    System.gc();
+                    System.runFinalization();
+                    try {
+                        Thread.sleep(sleepTime);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+
+                // Additional driver recovery time for every 4th layer
+                if ((layer + 1) % 4 == 0) {
+                    System.err.printf("[TORNADO-COPY] Driver recovery pause after layer %d (2 seconds)%n", layer);
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+
+            } catch (Exception e) {
+                System.err.printf("[TORNADO-COPY] ❌ CRITICAL: Failed on single layer %d: %s%n",
+                                layer, e.getMessage());
+                System.err.println("[TORNADO-COPY] Single-layer processing failed - this indicates severe memory issues");
+                throw new RuntimeException("TornadoVM single-layer processing failed at layer " + layer, e);
+            }
+        }
+
+        // Execute logits graph once at the end
+        System.err.println("[TORNADO-COPY] Executing logits graph");
+        executionPlan.withGraph(config.numberOfLayers() + 1).withGridScheduler(scheduler).execute();
+
+        System.err.println("[TORNADO-COPY] ✅ Completed single-layer fallback processing");
     }
 
     /**
