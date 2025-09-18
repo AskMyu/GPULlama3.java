@@ -706,8 +706,17 @@ public class TornadoVMMasterPlan {
                 tornadoVMLimit = Long.parseLong(deviceMemory) * multiplier;
             }
 
-            // Use the smaller of OpenCL max allocation and TornadoVM setting
-            long effectiveLimit = Math.min(openCLMaxAlloc, tornadoVMLimit);
+            // PRIORITY FIX: TornadoVM setting is based on actual system detection, OpenCL detection can be conservative
+            long effectiveLimit;
+            if (tornadoVMLimit > openCLMaxAlloc) {
+                // TornadoVM setting is higher - it comes from system detection, so trust it
+                effectiveLimit = tornadoVMLimit;
+                System.err.printf("[TORNADO-COPY] Using TornadoVM system-detected setting over conservative OpenCL detection%n");
+            } else {
+                // OpenCL detection is higher or equal - use it (rare but possible)
+                effectiveLimit = openCLMaxAlloc;
+                System.err.printf("[TORNADO-COPY] Using OpenCL detection (higher than TornadoVM setting)%n");
+            }
 
             System.err.printf("[TORNADO-COPY] GPU Memory Limits: OpenCL=%.2f GB, TornadoVM=%.2f GB, Using=%.2f GB%n",
                             openCLMaxAlloc / (1024.0 * 1024.0 * 1024.0),
@@ -743,7 +752,7 @@ public class TornadoVMMasterPlan {
             }
         } else {
             // Standard FFN: gate, up, down projections
-            weightsPerLayer += 3L * config.dim() * config.dim() * 4L; // Assuming 4x hidden dim
+            weightsPerLayer += 3L * config.dim() * config.hiddenDim(); // Use actual hidden dim
         }
 
         // Assume float32 (4 bytes per weight)
