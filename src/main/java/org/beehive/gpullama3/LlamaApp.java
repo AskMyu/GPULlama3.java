@@ -6,7 +6,9 @@ import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import org.beehive.gpullama3.inference.sampler.CategoricalSampler;
 import org.beehive.gpullama3.inference.sampler.Sampler;
 import org.beehive.gpullama3.inference.sampler.ToppSampler;
+import org.beehive.gpullama3.inference.sampler.TopKSampler;
 import org.beehive.gpullama3.model.Model;
+import org.beehive.gpullama3.model.ModelType;
 import org.beehive.gpullama3.model.loader.ModelLoader;
 import org.beehive.gpullama3.tornadovm.FloatArrayUtils;
 import org.beehive.gpullama3.multimodal.data.MultimodalInput;
@@ -65,7 +67,11 @@ public class LlamaApp {
      * @throws IllegalArgumentException
      *         if logits are of an unsupported type
      */
-    public static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
+    public static Sampler selectSampler(int vocabularySize, float temperature, float topp, int topK, long rngSeed) {
+        return selectSampler(vocabularySize, temperature, topp, topK, rngSeed, null);
+    }
+
+    public static Sampler selectSampler(int vocabularySize, float temperature, float topp, int topK, long rngSeed, ModelType modelType) {
         Sampler sampler;
         if (temperature == 0.0f) {
             // greedy argmax sampling: take the token with the highest probability
@@ -76,50 +82,63 @@ public class LlamaApp {
             long entropyEnhancedSeed = rngSeed ^ System.nanoTime() ^ Thread.currentThread().getId();
             RandomGenerator rng = RandomGeneratorFactory.getDefault().create(entropyEnhancedSeed);
             Sampler innerSampler;
-            // Determine whether to use top-p (nucleus) sampling
-            if (topp <= 0 || topp >= 1) {
-                // If topp is outside (0,1), use standard categorical sampling
-                // This samples directly from the probability distribution
-                innerSampler = new CategoricalSampler(rng, vocabularySize);
-            } else {
+            // Gemma models work best with top-K sampling (Google recommendation: K=64)
+            // Use top-K as primary sampling method when specified
+            if (topK > 0 && topK < vocabularySize) {
+                // Use top-K sampling - optimal for Gemma models
+                innerSampler = new TopKSampler(vocabularySize, topK, rng);
+            } else if (topp > 0 && topp < 1) {
                 // Use top-p (nucleus) sampling with the specified threshold
-                // This restricts sampling to only the most likely tokens that
-                // cumulatively comprise the top p probability mass
                 innerSampler = new ToppSampler(vocabularySize, topp, rng);
+            } else {
+                // Fallback to standard categorical sampling
+                innerSampler = new CategoricalSampler(rng, vocabularySize);
             }
 
             // Create a sampler that:
             // 1. Applies temperature scaling to the logits
             // 2. Converts logits to probabilities using softmax
             // 3. Delegates the actual sampling to the appropriate inner sampler
+            final String modelTypeName = modelType != null ? modelType.name() : "UNKNOWN";
             sampler = logits -> {
-                System.err.println("[LAMBDA-DEBUG] ===== LAMBDA SAMPLER WRAPPER CALLED =====");
-                System.err.printf("[LAMBDA-DEBUG] Logits type: %s%n", 
+                System.err.printf("[%s-SAMPLER] ===== SAMPLER WRAPPER CALLED =====%n", modelTypeName);
+                System.err.printf("[%s-SAMPLER] Logits type: %s%n", modelTypeName,
                     logits != null ? logits.getClass().getName() : "null");
                 
                 // Handle different logits formats to support both CPU and GPU paths
                 if (logits instanceof FloatTensor) {
                     // For CPU path using FloatTensor
                     FloatTensor tensorLogits = (FloatTensor) logits;
-                    System.err.printf("[LAMBDA-DEBUG] FloatTensor size BEFORE processing: %d%n", tensorLogits.size());
+                    System.err.printf("[%s-SAMPLER] FloatTensor size BEFORE processing: %d%n", modelTypeName, tensorLogits.size());
+
+                    // Check for extreme logits values that could cause numeric instability
+                    float maxLogit = Float.NEGATIVE_INFINITY;
+                    float minLogit = Float.POSITIVE_INFINITY;
+                    for (int i = 0; i < tensorLogits.size(); i++) {
+                        float logit = tensorLogits.getFloat(i);
+                        maxLogit = Math.max(maxLogit, logit);
+                        minLogit = Math.min(minLogit, logit);
+                    }
+                    System.err.printf("[%s-SAMPLER] Logits range BEFORE processing: [%.6f, %.6f]%n", modelTypeName, minLogit, maxLogit);
+
                     // Apply temperature scaling - lower values make distribution more peaked
                     tensorLogits.divideInPlace(0, tensorLogits.size(), temperature);
                     // Convert logits to probabilities using softmax
                     tensorLogits.softmaxInPlace(0, tensorLogits.size());
-                    System.err.printf("[LAMBDA-DEBUG] FloatTensor size AFTER processing: %d%n", tensorLogits.size());
+                    System.err.printf("[%s-SAMPLER] FloatTensor size AFTER processing: %d%n", modelTypeName, tensorLogits.size());
                 } else if (logits instanceof FloatArray) {
                     // For GPU path using FloatArray
                     FloatArray arrayLogits = (FloatArray) logits;
-                    System.err.printf("[LAMBDA-DEBUG] FloatArray size BEFORE processing: %d%n", arrayLogits.getSize());
-                    
+                    System.err.printf("[%s-SAMPLER] FloatArray size BEFORE processing: %d%n", modelTypeName, arrayLogits.getSize());
+
                     // 🚨 CRITICAL VOCABULARY BOUNDS FIX 🚨
                     // Some models (like Gemma) have larger vocabulary sizes than others
                     // Use the actual model vocabulary size instead of hardcoding
                     final int VOCAB_SIZE = vocabularySize;
                     if (arrayLogits.getSize() > VOCAB_SIZE) {
-                        System.err.printf("[VOCAB-FIX] 🔥 Truncating logits from %d to %d (vocab bounds)%n", 
-                            arrayLogits.getSize(), VOCAB_SIZE);
-                        
+                        System.err.printf("[%s-VOCAB-FIX] 🔥 Truncating logits from %d to %d (vocab bounds)%n",
+                            modelTypeName, arrayLogits.getSize(), VOCAB_SIZE);
+
                         // Create new truncated array with only vocabulary-valid logits
                         FloatArray truncatedLogits = new FloatArray(VOCAB_SIZE);
                         for (int i = 0; i < VOCAB_SIZE; i++) {
@@ -127,44 +146,71 @@ public class LlamaApp {
                         }
                         arrayLogits = truncatedLogits;
                         logits = arrayLogits; // Update the logits reference
-                        System.err.printf("[VOCAB-FIX] ✅ Logits truncated to valid vocabulary size: %d%n", arrayLogits.getSize());
+                        System.err.printf("[%s-VOCAB-FIX] ✅ Logits truncated to valid vocabulary size: %d%n", modelTypeName, arrayLogits.getSize());
                     } else {
-                        System.err.printf("[VOCAB-FIX] ✅ Logits size %d is within vocab bounds%n", arrayLogits.getSize());
+                        System.err.printf("[%s-VOCAB-FIX] ✅ Logits size %d is within vocab bounds%n", modelTypeName, arrayLogits.getSize());
                     }
-                    
+
+                    // Check for extreme logits values that could cause numeric instability
+                    float maxLogit = Float.NEGATIVE_INFINITY;
+                    float minLogit = Float.POSITIVE_INFINITY;
+                    int nonZeroCount = 0;
+                    for (int i = 0; i < Math.min(arrayLogits.getSize(), 100); i++) {
+                        float logit = arrayLogits.get(i);
+                        if (Math.abs(logit) > 1e-8) nonZeroCount++;
+                        maxLogit = Math.max(maxLogit, logit);
+                        minLogit = Math.min(minLogit, logit);
+                    }
+                    System.err.printf("[%s-SAMPLER] Logits range BEFORE processing: [%.6f, %.6f], non-zero: %d/100%n",
+                        modelTypeName, minLogit, maxLogit, nonZeroCount);
+
                     // Apply the same operations but using FloatArray-specific methods for TornadoVM data types
+                    System.err.printf("[%s-SAMPLER] Temperature scaling with temperature=%.6f%n", modelTypeName, temperature);
                     FloatArrayUtils.divideInPlace(arrayLogits, 0, arrayLogits.getSize(), temperature);
+
+                    // Check values after temperature scaling
+                    maxLogit = Float.NEGATIVE_INFINITY;
+                    minLogit = Float.POSITIVE_INFINITY;
+                    for (int i = 0; i < Math.min(arrayLogits.getSize(), 10); i++) {
+                        float logit = arrayLogits.get(i);
+                        maxLogit = Math.max(maxLogit, logit);
+                        minLogit = Math.min(minLogit, logit);
+                    }
+                    System.err.printf("[%s-SAMPLER] After temperature scaling: [%.6f, %.6f]%n", modelTypeName, minLogit, maxLogit);
+
                     FloatArrayUtils.softmaxInPlace(arrayLogits, 0, arrayLogits.getSize());
-                    System.err.printf("[LAMBDA-DEBUG] FloatArray size AFTER processing: %d%n", arrayLogits.getSize());
+
+                    // Check post-processing values (now probabilities, not logits)
+                    maxLogit = Float.NEGATIVE_INFINITY;
+                    minLogit = Float.POSITIVE_INFINITY;
+                    nonZeroCount = 0;
+                    double totalSum = 0.0;
+                    int maxProbIdx = 0;
+
+                    // Check a larger sample for better statistics
+                    for (int i = 0; i < arrayLogits.getSize(); i++) {
+                        float prob = arrayLogits.get(i);
+                        totalSum += prob;
+                        if (prob > maxLogit) {
+                            maxLogit = prob;
+                            maxProbIdx = i;
+                        }
+                        if (prob > 0) {
+                            minLogit = Math.min(minLogit, prob);
+                            nonZeroCount++;
+                        }
+                    }
+                    System.err.printf("[%s-SAMPLER] Probabilities AFTER softmax: max=%.9f (token %d), min_positive=%.9f, non-zero: %d/%d, sum=%.9f%n",
+                        modelTypeName, maxLogit, maxProbIdx, minLogit, nonZeroCount, arrayLogits.getSize(), totalSum);
+                    System.err.printf("[%s-SAMPLER] FloatArray size AFTER processing: %d%n", modelTypeName, arrayLogits.getSize());
                 } else {
                     // If logits are neither FloatTensor nor FloatArray, throw an exception
                     throw new IllegalArgumentException("Unsupported logits type: " + (logits != null ? logits.getClass().getName() : "null"));
                 }
-                
-                // GRANITE DEBUG: Check logits values to see why token 0 is always selected
-                if (logits instanceof FloatArray floatArrayLogits) {
-                    float maxLogit = Float.NEGATIVE_INFINITY;
-                    int maxToken = -1;
-                    float token0Logit = floatArrayLogits.get(0);
-                    int nonZeroLogits = 0;
-
-                    for (int i = 0; i < Math.min(floatArrayLogits.getSize(), 100); i++) {
-                        float logit = floatArrayLogits.get(i);
-                        if (Math.abs(logit) > 1e-8) nonZeroLogits++;
-                        if (logit > maxLogit) {
-                            maxLogit = logit;
-                            maxToken = i;
-                        }
-                    }
-
-                    System.err.printf("[GRANITE-LOGITS] Token 0 logit: %.6f, Max logit: %.6f (token %d), Non-zero logits: %d/%d%n",
-                                     token0Logit, maxLogit, maxToken, nonZeroLogits, Math.min(floatArrayLogits.getSize(), 100));
-                }
-
-                System.err.println("[LAMBDA-DEBUG] About to call innerSampler.sampleToken()...");
+                System.err.printf("[%s-SAMPLER] About to call innerSampler.sampleToken()...%n", modelTypeName);
                 int result = innerSampler.sampleToken(logits);
-                System.err.printf("[LAMBDA-DEBUG] innerSampler returned token: %d%n", result);
-                System.err.println("[LAMBDA-DEBUG] ===== LAMBDA SAMPLER WRAPPER RETURNING =====");
+                System.err.printf("[%s-SAMPLER] innerSampler returned token: %d%n", modelTypeName, result);
+                System.err.printf("[%s-SAMPLER] ===== SAMPLER WRAPPER RETURNING =====%n", modelTypeName);
                 return result;
             };
         }
@@ -198,7 +244,7 @@ public class LlamaApp {
     }
 
     private static Sampler createSampler(Model model, Options options) {
-        return selectSampler(model.configuration().vocabularySize(), options.temperature(), options.topp(), options.seed());
+        return selectSampler(model.configuration().vocabularySize(), options.temperature(), options.topp(), options.topK(), options.seed(), model.getModelType());
     }
 
     private static void runSingleInstruction(Model model, Sampler sampler, Options options) {

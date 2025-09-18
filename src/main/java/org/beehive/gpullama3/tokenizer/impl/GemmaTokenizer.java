@@ -103,22 +103,90 @@ public class GemmaTokenizer implements Tokenizer {
     @Override
     public String decode(List<Integer> tokens) {
         StringBuilder result = new StringBuilder();
-        
-        for (int token : tokens) {
+
+        System.err.printf("[GEMMA-TOKENIZER] Decoding %d tokens: %s%n", tokens.size(),
+                          tokens.subList(0, Math.min(10, tokens.size())).toString());
+
+        for (int i = 0; i < tokens.size(); i++) {
+            int token = tokens.get(i);
             if (!isSpecialToken(token)) {
                 String tokenStr = vocabulary.get(token);
-                // Handle SentencePiece's ▁ prefix for spaces
+
+                // Handle null/missing tokens
+                if (tokenStr == null) {
+                    System.err.printf("[GEMMA-TOKENIZER] Warning: Missing token %d in vocabulary%n", token);
+                    continue;
+                }
+
+                // Debug first 10 tokens
+                if (i < 10) {
+                    System.err.printf("[GEMMA-TOKENIZER] Token %d: %d -> '%s' (length=%d)%n",
+                                      i, token, tokenStr.replace("\n", "\\n").replace("\t", "\\t"), tokenStr.length());
+                }
+
+                // Skip unused tokens and problematic sequences
+                if (tokenStr.startsWith("<unused") ||
+                    tokenStr.startsWith("<0x") ||
+                    tokenStr.startsWith("�") ||
+                    tokenStr.equals("") ||
+                    tokenStr.matches("^<[^>]*>$")) { // Skip any <tag> format tokens
+                    if (i < 10) {
+                        System.err.printf("[GEMMA-TOKENIZER] Skipping problematic token: '%s'%n", tokenStr);
+                    }
+                    continue;
+                }
+
+                // Enhanced SentencePiece handling
                 if (tokenStr.startsWith("▁")) {
+                    // ▁ represents word boundary in SentencePiece
                     if (result.length() > 0) {
                         result.append(" ");
                     }
-                    result.append(tokenStr.substring(1));
+                    String content = tokenStr.substring(1);
+                    if (!content.isEmpty()) {
+                        result.append(content);
+                    }
+                    if (i < 10) {
+                        System.err.printf("[GEMMA-TOKENIZER] Added space+content: '%s'%n", content);
+                    }
+                } else if (tokenStr.startsWith("Ġ")) {
+                    // GPT-2 style space prefix (some Gemma models use this)
+                    if (result.length() > 0) {
+                        result.append(" ");
+                    }
+                    String content = tokenStr.substring(1);
+                    if (!content.isEmpty()) {
+                        result.append(content);
+                    }
+                    if (i < 10) {
+                        System.err.printf("[GEMMA-TOKENIZER] Added space+content (GPT2): '%s'%n", content);
+                    }
                 } else {
-                    result.append(tokenStr);
+                    // Regular token - append directly
+                    if (!tokenStr.isEmpty()) {
+                        result.append(tokenStr);
+                        if (i < 10) {
+                            System.err.printf("[GEMMA-TOKENIZER] Added directly: '%s'%n", tokenStr.replace("\n", "\\n").replace("\t", "\\t"));
+                        }
+                    }
+                }
+            } else {
+                if (i < 10) {
+                    System.err.printf("[GEMMA-TOKENIZER] Skipping special token %d%n", token);
                 }
             }
         }
-        
-        return result.toString();
+
+        // Clean up the result
+        String output = result.toString();
+
+        // Post-process to fix common issues
+        output = output.replaceAll("\\s+", " "); // Normalize multiple spaces
+        output = output.trim(); // Remove leading/trailing spaces
+
+        System.err.printf("[GEMMA-TOKENIZER] Final output (length=%d): '%s'%n",
+                          output.length(), output.length() <= 50 ? output : output.substring(0, 50) + "...");
+
+        return output;
     }
 }

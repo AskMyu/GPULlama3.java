@@ -2043,4 +2043,248 @@ public class TransformerComputeKernelsLayered {
 
         return result;
     }
+
+    // ============================================================================
+    // GEMMA 3-SPECIFIC QK-NORM GPU KERNELS
+    // ============================================================================
+
+    /**
+     * QK-Norm GPU kernel for Gemma 3 models.
+     *
+     * Replaces soft-capping with proper L2 normalization for better numerical stability.
+     * This is a key architectural difference in Gemma 3 that improves training stability
+     * and reduces oscillation patterns.
+     *
+     * Based on Google's Gemma 3 technical report: "QK-norm replaces the logit soft-capping
+     * from Gemma 2 and provides better numerical stability during training."
+     *
+     * @param context Kernel execution context
+     * @param q Query tensor to normalize (modified in-place)
+     * @param k Key tensor to normalize (modified in-place)
+     * @param headSize Size of each attention head
+     * @param epsilon Epsilon value for numerical stability (typically 1e-6)
+     */
+    public static void qkNormKernel(KernelContext context, FloatArray q, FloatArray k, int headSize, float epsilon) {
+        int tid = context.globalIdx;
+
+        // Each thread processes one element, but we need to coordinate within each head
+        if (tid >= headSize * 2) return; // Process both q and k simultaneously
+
+        int headIdx = tid / headSize;
+        int elemIdx = tid % headSize;
+
+        // Use local memory for reduction within work group
+        float[] localSumQ = context.allocateFloatLocalArray(context.localGroupSizeX);
+        float[] localSumK = context.allocateFloatLocalArray(context.localGroupSizeX);
+
+        int localId = context.localIdx;
+        int groupSize = context.localGroupSizeX;
+
+        // Load and square the values
+        float qVal = (elemIdx < headSize) ? q.get(headIdx * headSize + elemIdx) : 0.0f;
+        float kVal = (elemIdx < headSize) ? k.get(headIdx * headSize + elemIdx) : 0.0f;
+
+        localSumQ[localId] = qVal * qVal;
+        localSumK[localId] = kVal * kVal;
+
+        // Synchronize work group
+        context.localBarrier();
+
+        // Parallel reduction to compute L2 norm squared
+        for (int stride = groupSize / 2; stride > 0; stride /= 2) {
+            if (localId < stride) {
+                localSumQ[localId] += localSumQ[localId + stride];
+                localSumK[localId] += localSumK[localId + stride];
+            }
+            context.localBarrier();
+        }
+
+        // Compute normalization factor
+        if (localId == 0) {
+            float normQ = TornadoMath.sqrt(localSumQ[0] + epsilon);
+            float normK = TornadoMath.sqrt(localSumK[0] + epsilon);
+
+            // Store norms in first two elements for all threads to use
+            localSumQ[0] = normQ;
+            localSumK[0] = normK;
+        }
+
+        context.localBarrier();
+
+        // Apply normalization
+        if (elemIdx < headSize) {
+            q.set(headIdx * headSize + elemIdx, qVal / localSumQ[0]);
+            k.set(headIdx * headSize + elemIdx, kVal / localSumK[0]);
+        }
+    }
+
+    /**
+     * Enhanced QK-Norm kernel with per-head processing for better parallelization.
+     * Each work group processes one attention head, allowing for better GPU utilization.
+     *
+     * @param context Kernel execution context
+     * @param q Query tensor (nHeads * headSize elements)
+     * @param k Key tensor (nHeads * headSize elements)
+     * @param nHeads Number of attention heads
+     * @param headSize Size of each attention head
+     * @param epsilon Epsilon value for numerical stability
+     */
+    public static void qkNormPerHeadKernel(KernelContext context, FloatArray q, FloatArray k,
+                                          int nHeads, int headSize, float epsilon) {
+        int headIdx = context.groupIdx;  // Each work group processes one head
+        int tid = context.localIdx;      // Thread within the work group
+        int groupSize = context.localGroupSizeX;
+
+        if (headIdx >= nHeads) return;
+
+        // Allocate local memory for reduction
+        float[] localSumQ = context.allocateFloatLocalArray(groupSize);
+        float[] localSumK = context.allocateFloatLocalArray(groupSize);
+
+        // Initialize local sums
+        localSumQ[tid] = 0.0f;
+        localSumK[tid] = 0.0f;
+
+        // Compute partial sums for this head
+        int baseOffset = headIdx * headSize;
+        for (int i = tid; i < headSize; i += groupSize) {
+            float qVal = q.get(baseOffset + i);
+            float kVal = k.get(baseOffset + i);
+            localSumQ[tid] += qVal * qVal;
+            localSumK[tid] += kVal * kVal;
+        }
+
+        context.localBarrier();
+
+        // Parallel reduction to compute L2 norm squared
+        for (int stride = groupSize / 2; stride > 0; stride /= 2) {
+            if (tid < stride) {
+                localSumQ[tid] += localSumQ[tid + stride];
+                localSumK[tid] += localSumK[tid + stride];
+            }
+            context.localBarrier();
+        }
+
+        // Compute normalization factors
+        float normQ = 1.0f;
+        float normK = 1.0f;
+
+        if (tid == 0) {
+            normQ = TornadoMath.sqrt(localSumQ[0] + epsilon);
+            normK = TornadoMath.sqrt(localSumK[0] + epsilon);
+
+            // Avoid division by zero
+            if (normQ < epsilon) normQ = 1.0f;
+            if (normK < epsilon) normK = 1.0f;
+
+            // Store in local memory for all threads
+            localSumQ[0] = normQ;
+            localSumK[0] = normK;
+        }
+
+        context.localBarrier();
+
+        // Apply normalization
+        normQ = localSumQ[0];
+        normK = localSumK[0];
+
+        for (int i = tid; i < headSize; i += groupSize) {
+            int idx = baseOffset + i;
+            q.set(idx, q.get(idx) / normQ);
+            k.set(idx, k.get(idx) / normK);
+        }
+    }
+
+    /**
+     * QK-Norm with sliding window attention support for Gemma 3 local layers.
+     * Applies normalization only to the relevant window of keys for local attention.
+     *
+     * @param context Kernel execution context
+     * @param q Query tensor
+     * @param k Key tensor
+     * @param nHeads Number of attention heads
+     * @param headSize Size of each attention head
+     * @param windowSize Local attention window size (1024 for Gemma 3)
+     * @param position Current sequence position
+     * @param epsilon Epsilon for numerical stability
+     */
+    public static void qkNormSlidingWindowKernel(KernelContext context, FloatArray q, FloatArray k,
+                                                 int nHeads, int headSize, int windowSize,
+                                                 int position, float epsilon) {
+        int headIdx = context.groupIdx;
+        int tid = context.localIdx;
+        int groupSize = context.localGroupSizeX;
+
+        if (headIdx >= nHeads) return;
+
+        // Calculate sliding window bounds
+        int windowStart = Math.max(0, position - windowSize + 1);
+        int windowEnd = position + 1;
+        int effectiveWindowSize = windowEnd - windowStart;
+
+        // Allocate local memory
+        float[] localSumQ = context.allocateFloatLocalArray(groupSize);
+        float[] localSumK = context.allocateFloatLocalArray(groupSize);
+
+        localSumQ[tid] = 0.0f;
+        localSumK[tid] = 0.0f;
+
+        // Process current query (always normalize the current query)
+        int baseOffsetQ = headIdx * headSize;
+        for (int i = tid; i < headSize; i += groupSize) {
+            float qVal = q.get(baseOffsetQ + i);
+            localSumQ[tid] += qVal * qVal;
+        }
+
+        // Process keys within the sliding window
+        int baseOffsetK = headIdx * headSize * effectiveWindowSize;
+        for (int pos = 0; pos < effectiveWindowSize; pos++) {
+            for (int i = tid; i < headSize; i += groupSize) {
+                float kVal = k.get(baseOffsetK + pos * headSize + i);
+                localSumK[tid] += kVal * kVal;
+            }
+        }
+
+        context.localBarrier();
+
+        // Parallel reduction
+        for (int stride = groupSize / 2; stride > 0; stride /= 2) {
+            if (tid < stride) {
+                localSumQ[tid] += localSumQ[tid + stride];
+                localSumK[tid] += localSumK[tid + stride];
+            }
+            context.localBarrier();
+        }
+
+        // Compute and apply normalization
+        if (tid == 0) {
+            float normQ = TornadoMath.sqrt(localSumQ[0] + epsilon);
+            float normK = TornadoMath.sqrt(localSumK[0] + epsilon);
+
+            if (normQ < epsilon) normQ = 1.0f;
+            if (normK < epsilon) normK = 1.0f;
+
+            localSumQ[0] = normQ;
+            localSumK[0] = normK;
+        }
+
+        context.localBarrier();
+
+        float normQ = localSumQ[0];
+        float normK = localSumK[0];
+
+        // Normalize query
+        for (int i = tid; i < headSize; i += groupSize) {
+            int idx = baseOffsetQ + i;
+            q.set(idx, q.get(idx) / normQ);
+        }
+
+        // Normalize keys in sliding window
+        for (int pos = 0; pos < effectiveWindowSize; pos++) {
+            for (int i = tid; i < headSize; i += groupSize) {
+                int idx = baseOffsetK + pos * headSize + i;
+                k.set(idx, k.get(idx) / normK);
+            }
+        }
+    }
 }

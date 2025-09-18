@@ -62,31 +62,51 @@ public final class FloatArrayUtils {
         }
 
         // Apply exp(x-max) to each element and calculate sum
-        float sum = 0.0f;
+        double sum = 0.0; // Use double precision for sum accumulation
         for (int i = start; i < end; i++) {
+            float logit = array.get(i) - maxVal; // Subtract max for stability
             float exp;
             if (TornadoVMSupport.isTornadoVMEnabled()) {
                 // Use TornadoMath for GPU execution if possible
-                exp = TornadoMath.exp(array.get(i) - maxVal);
+                exp = TornadoMath.exp(logit);
             } else {
                 // Fallback to standard Math
-                exp = (float) Math.exp(array.get(i) - maxVal);
+                exp = (float) Math.exp(logit);
             }
+
+            // Handle underflow: if exp is too small, set to minimum representable value
+            if (exp == 0.0f && logit > -87.0f) { // -87 is approximate limit for float exp
+                exp = Float.MIN_VALUE;
+            }
+
             array.set(i, exp);
             sum += exp;
         }
 
-        // Normalize by sum
-        if (sum == 0.0f) {
-            // Handle edge case, divide evenly
-            float value = 1.0f / (end - start);
+        // Enhanced debug output
+        System.err.printf("[SOFTMAX-DEBUG] Processing range [%d:%d], maxVal=%.6f, sum=%.15e%n",
+            start, end, maxVal, sum);
+
+        // Enhanced edge case handling with debug info
+        if (sum == 0.0 || sum < 1e-30) {
+            System.err.printf("[SOFTMAX-DEBUG] Sum underflow detected: sum=%.15e, maxVal=%.6f, range=[%.6f, %.6f]%n",
+                sum, maxVal, array.get(start), array.get(Math.min(start + 10, end - 1)));
+            // Use uniform distribution as fallback
+            float uniformProb = 1.0f / (end - start);
             for (int i = start; i < end; i++) {
-                array.set(i, value);
+                array.set(i, uniformProb);
             }
         } else {
-            // Normal case, divide by sum
+            // Normal case, divide by sum (cast to float)
+            float sumF = (float) sum;
+            System.err.printf("[SOFTMAX-DEBUG] Normal softmax: sum=%.15e, sumF=%.6f%n", sum, sumF);
             for (int i = start; i < end; i++) {
-                array.set(i, array.get(i) / sum);
+                float prob = array.get(i) / sumF;
+                // Ensure no zero probabilities for non-zero logits
+                if (prob == 0.0f) {
+                    prob = Float.MIN_VALUE;
+                }
+                array.set(i, prob);
             }
         }
 

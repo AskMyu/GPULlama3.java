@@ -84,13 +84,21 @@ public final class GemmaState extends State {
         fields.tempFFN = new FloatArray(1 + ((config.dim() + localSize - 1) / localSize));
         fields.tempLogits = new FloatArray(1 + ((config.dim() + localSize - 1) / localSize));
 
-        // Add Gemma model detection flag - set last element to special marker value
-        // This allows GPU kernels to reliably detect Gemma models
+        // Add Gemma 3 model detection flags - set last elements to special marker values
+        // This allows GPU kernels to reliably detect Gemma models and apply optimizations
         int tempSize = fields.temp.getSize();
         if (tempSize > 1) {
             fields.temp.set(tempSize - 1, -999.0f); // Gemma detection marker
             fields.tempFFN.set(tempSize - 1, -999.0f);
             fields.tempLogits.set(tempSize - 1, -999.0f);
+        }
+
+        // Additional Gemma 3 optimization hints
+        if (tempSize > 2) {
+            // Mark as Gemma 3 with 5:1 attention pattern
+            fields.temp.set(tempSize - 2, -888.0f); // Gemma 3 variant marker
+            fields.tempFFN.set(tempSize - 2, -888.0f);
+            fields.tempLogits.set(tempSize - 2, -888.0f);
         }
 
         return fields;

@@ -70,4 +70,33 @@ public record GemmaConfiguration(
                 this.ropeTheta
         );
     }
+
+    /**
+     * Determines if a layer should use global attention (every 6th layer in Gemma 3).
+     * Gemma 3 uses 5:1 local-to-global attention ratio.
+     */
+    public boolean isGlobalAttentionLayer(int layer) {
+        return (layer % 6) == 5;
+    }
+
+    /**
+     * Returns the local attention window size for Gemma 3 (1,024 tokens).
+     */
+    public int getLocalWindowSize() {
+        return 1024;
+    }
+
+    /**
+     * Returns enhanced RoPE theta for global layers (1M base frequency).
+     */
+    public float getGlobalRopeTheta() {
+        return 1000000.0f;
+    }
+
+    /**
+     * Returns QK-norm epsilon for numerical stability.
+     */
+    public float getQKNormEpsilon() {
+        return rmsNormEps;
+    }
 }

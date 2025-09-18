@@ -4,7 +4,7 @@ import java.io.PrintStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
-public record Options(Path modelPath, String prompt, String systemPrompt, String suffix, boolean interactive, float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo,
+public record Options(Path modelPath, String prompt, String systemPrompt, String suffix, boolean interactive, float temperature, float topp, int topK, long seed, int maxTokens, boolean stream, boolean echo,
                       boolean useTornadovm, Path imagePath) {
 
     public static final int DEFAULT_MAX_TOKENS = 1024;
@@ -13,6 +13,7 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
         require(interactive || prompt != null, "Missing argument: --prompt is required in --instruct mode e.g. --prompt \"Why is the sky blue?\"");
         require(0 <= temperature, "Invalid argument: --temperature must be non-negative");
         require(0 <= topp && topp <= 1, "Invalid argument: --top-p must be within [0, 1]");
+        require(topK > 0, "Invalid argument: --top-k must be positive");
     }
 
     static void require(boolean condition, String messageFormat, Object... args) {
@@ -48,8 +49,9 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
         out.println("  --prompt, -p <string>         input prompt");
         out.println("  --system-prompt, -sp <string> (optional) system prompt (Llama models)");
         out.println("  --suffix <string>             suffix for fill-in-the-middle request (Codestral)");
-        out.println("  --temperature, -temp <float>  temperature in [0,inf], default 0.1");
+        out.println("  --temperature, -temp <float>  temperature in [0,inf], default 1.0 (Gemma optimized)");
         out.println("  --top-p <float>               p value in top-p (nucleus) sampling in [0,1] default 0.95");
+        out.println("  --top-k <int>                 k value in top-k sampling, default 64 (Gemma optimized)");
         out.println("  --seed <long>                 random seed, default System.nanoTime()");
         out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS);
         out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
@@ -63,8 +65,9 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
         String prompt = "Tell me a story with Java"; // Hardcoded for testing
         String systemPrompt = null;
         String suffix = null;
-        float temperature = 0.1f;
+        float temperature = 1.0f;  // Google official recommendation for Gemma models
         float topp = 0.95f;
+        int topK = 64;  // Google official recommendation for Gemma models
         Path modelPath = null;
         long seed = System.nanoTime();
         int maxTokens = DEFAULT_MAX_TOKENS;
@@ -73,15 +76,16 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
         boolean echo = false;
         boolean useTornadoVM = getDefaultTornadoVM();
 
-        return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, seed, maxTokens, stream, echo, useTornadoVM, null);
+        return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, topK, seed, maxTokens, stream, echo, useTornadoVM, null);
     }
 
     public static Options parseOptions(String[] args) {
         String prompt = "Tell me a story with Java"; // Hardcoded for testing
         String systemPrompt = null;
         String suffix = null;
-        float temperature = 0.1f;
+        float temperature = 1.0f;  // Google official recommendation for Gemma models
         float topp = 0.95f;
+        int topK = 64;  // Google official recommendation for Gemma models
         Path modelPath = null;
         long seed = System.nanoTime();
         int maxTokens = DEFAULT_MAX_TOKENS;
@@ -118,6 +122,7 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
                         case "--suffix" -> suffix = nextArg;
                         case "--temperature", "--temp" -> temperature = Float.parseFloat(nextArg);
                         case "--top-p" -> topp = Float.parseFloat(nextArg);
+                        case "--top-k" -> topK = Integer.parseInt(nextArg);
                         case "--model", "-m" -> modelPath = Paths.get(nextArg);
                         case "--seed", "-s" -> seed = Long.parseLong(nextArg);
                         case "--max-tokens", "-n" -> maxTokens = Integer.parseInt(nextArg);
@@ -137,6 +142,6 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
             useTornadovm = getDefaultTornadoVM();
         }
 
-        return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, seed, maxTokens, stream, echo, useTornadovm, imagePath);
+        return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, topK, seed, maxTokens, stream, echo, useTornadovm, imagePath);
     }
 }
