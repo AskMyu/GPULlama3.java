@@ -8,6 +8,7 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import java.util.logging.Logger;
 import java.util.List;
@@ -86,6 +87,20 @@ public class GPUTensorConverter {
         Integer.parseInt(System.getProperty("gpu.tensor.conversion.pool.max.size", "16"));
     private static final boolean UNSAFE_BULK_COPY_ENABLED =
         Boolean.parseBoolean(System.getProperty("gpu.tensor.conversion.unsafe.bulk", "false"));
+
+    // Phase 6 Optimizations: Hybrid Fallback Solution
+    private static final boolean HYBRID_ENABLED =
+        Boolean.parseBoolean(System.getProperty("gpu.tensor.conversion.hybrid.enabled", "true"));
+    private static final int MAX_STREAMING_FAILURES =
+        Integer.parseInt(System.getProperty("gpu.tensor.conversion.hybrid.max.failures", "2"));
+    private static final int MIN_CHUNK_SIZE =
+        Integer.parseInt(System.getProperty("gpu.tensor.conversion.hybrid.min.chunk.size", "100000"));
+    private static final boolean PROGRESSIVE_REDUCTION_ENABLED =
+        Boolean.parseBoolean(System.getProperty("gpu.tensor.conversion.hybrid.progressive.reduction", "true"));
+
+    // Phase 6 Dynamic State Management
+    private static volatile boolean DYNAMIC_STREAMING_DISABLED = false;
+    private static final AtomicInteger GPU_OOM_COUNT = new AtomicInteger(0);
 
     // GPU device info
     private static boolean gpuInitialized = false;
@@ -885,32 +900,34 @@ public class GPUTensorConverter {
                 CONVERSION_CACHE.put(tensorHash, result);
                 return result;
             } else {
-                // Large tensor - choose processing strategy
-                int numChunks = (tensorSize + chunkSize - 1) / chunkSize;
-                logger.info(String.format("[GPU-CONVERT] Large tensor (%d elements), processing in %d chunks of %dM",
-                                        tensorSize, numChunks, chunkSize / 1_000_000));
-
+                // Large tensor - use Phase 6 hybrid approach
                 HalfFloatArray result;
 
-                if (STREAMING_ENABLED && numChunks >= 3) {
-                    // Phase 4 Optimization: Streaming pipeline with triple buffering
-                    logger.info("[GPU-CONVERT-OPT] Using streaming pipeline processing");
-                    result = convertF32ToHalfFloatGPUStreaming(tensor, tensorSize, chunkSize);
-                } else if (PARALLEL_CHUNKS && numChunks > 1) {
-                    // Process chunks in parallel
-                    logger.info("[GPU-CONVERT] Processing chunks in PARALLEL");
-                    result = processChunksParallel(tensor, tensorSize, chunkSize, numChunks);
+                if (HYBRID_ENABLED) {
+                    // Phase 6: Smart hybrid fallback solution
+                    result = convertF32ToHalfFloatGPUHybrid(tensor, tensorSize, chunkSize);
                 } else {
-                    // Sequential processing
-                    logger.info("[GPU-CONVERT] Processing chunks SEQUENTIALLY");
-                    result = processChunksSequential(tensor, tensorSize, chunkSize);
+                    // Legacy approach without hybrid fallback
+                    int numChunks = (tensorSize + chunkSize - 1) / chunkSize;
+                    logger.info(String.format("[GPU-CONVERT] Large tensor (%d elements), processing in %d chunks of %dM",
+                                            tensorSize, numChunks, chunkSize / 1_000_000));
+
+                    if (STREAMING_ENABLED && numChunks >= 3) {
+                        logger.info("[GPU-CONVERT-OPT] Using streaming pipeline processing");
+                        result = convertF32ToHalfFloatGPUStreaming(tensor, tensorSize, chunkSize);
+                    } else if (PARALLEL_CHUNKS && numChunks > 1) {
+                        logger.info("[GPU-CONVERT] Processing chunks in PARALLEL");
+                        result = processChunksParallel(tensor, tensorSize, chunkSize, numChunks);
+                    } else {
+                        logger.info("[GPU-CONVERT] Processing chunks SEQUENTIALLY");
+                        result = processChunksSequential(tensor, tensorSize, chunkSize);
+                    }
                 }
 
                 logger.info("[GPU-CONVERT] All chunks processed successfully");
                 CONVERSION_CACHE.put(tensorHash, result);
                 return result;
             }
-
 
         } catch (Exception e) {
             logger.severe("[GPU-CONVERT] GPU F32 conversion failed: " + e.getMessage());
@@ -939,4 +956,134 @@ public class GPUTensorConverter {
     public static void shutdown() {
         CONVERSION_POOL.shutdown();
     }
+
+    // ============= PHASE 6: HYBRID FALLBACK SOLUTION =============
+
+    /**
+     * Phase 6: Smart hybrid fallback GPU conversion with automatic degradation strategies
+     */
+    private static HalfFloatArray convertF32ToHalfFloatGPUHybrid(FloatTensor tensor, int tensorSize, int chunkSize) {
+        int numChunks = (tensorSize + chunkSize - 1) / chunkSize;
+
+        logger.info(String.format("[GPU-CONVERT-HYBRID] Processing %d elements in %d chunks (Phase 6 mode)",
+                                tensorSize, numChunks));
+
+        // Strategy 1: Try Phase 4 streaming if enabled and not dynamically disabled
+        if (STREAMING_ENABLED && !DYNAMIC_STREAMING_DISABLED && numChunks >= 3) {
+            try {
+                logger.info("[GPU-CONVERT-HYBRID] Attempting Phase 4 streaming pipeline");
+                HalfFloatArray result = convertF32ToHalfFloatGPUStreaming(tensor, tensorSize, chunkSize);
+
+                // Success - reset failure counter
+                GPU_OOM_COUNT.set(0);
+                logger.info("[GPU-CONVERT-HYBRID] Phase 4 streaming successful");
+                return result;
+
+            } catch (Exception e) {
+                // Check if this is a GPU memory allocation failure
+                if (isGPUMemoryException(e)) {
+                    int failureCount = GPU_OOM_COUNT.incrementAndGet();
+                    logger.warning(String.format(
+                        "[GPU-CONVERT-HYBRID] Phase 4 failed with GPU OOM (failure #%d): %s",
+                        failureCount, e.getMessage()));
+
+                    // Disable streaming for this session after max failures
+                    if (failureCount >= MAX_STREAMING_FAILURES) {
+                        DYNAMIC_STREAMING_DISABLED = true;
+                        logger.warning("[GPU-CONVERT-HYBRID] Disabling Phase 4 streaming for this session");
+                    }
+
+                    // Clean up any partial streaming resources
+                    cleanupStreamingResources();
+
+                    // Fall through to sequential processing
+                } else {
+                    // Non-memory exception - propagate it
+                    throw e;
+                }
+            }
+        }
+
+        // Strategy 2: Progressive chunk size reduction for memory pressure
+        if (PROGRESSIVE_REDUCTION_ENABLED) {
+            return convertWithProgressiveChunkReduction(tensor, tensorSize, chunkSize);
+        } else {
+            // Strategy 3: Direct sequential processing fallback
+            logger.info("[GPU-CONVERT-HYBRID] Using sequential processing fallback");
+            return processChunksSequential(tensor, tensorSize, chunkSize);
+        }
+    }
+
+    /**
+     * Progressive chunk size reduction strategy
+     */
+    private static HalfFloatArray convertWithProgressiveChunkReduction(FloatTensor tensor, int tensorSize, int chunkSize) {
+        int currentChunkSize = chunkSize;
+        int minChunkSize = Math.max(MIN_CHUNK_SIZE, chunkSize / 16); // Don't go below configured minimum
+
+        while (currentChunkSize >= minChunkSize) {
+            try {
+                logger.info(String.format("[GPU-CONVERT-HYBRID] Trying sequential processing with %.1f MB chunks",
+                                        currentChunkSize * 4.0 / 1_000_000));
+
+                return processChunksSequential(tensor, tensorSize, currentChunkSize);
+
+            } catch (Exception e) {
+                if (isGPUMemoryException(e)) {
+                    currentChunkSize = currentChunkSize / 2; // Halve chunk size
+                    logger.info(String.format("[GPU-CONVERT-HYBRID] Reducing chunk size to %.1f MB due to memory pressure",
+                                            currentChunkSize * 4.0 / 1_000_000));
+                } else {
+                    throw e; // Non-memory exception
+                }
+            }
+        }
+
+        // Strategy 3: Final fallback to CPU processing
+        logger.warning("[GPU-CONVERT-HYBRID] All GPU strategies failed, falling back to CPU");
+        return convertToHalfFloatArrayCPU(tensor, tensorSize);
+    }
+
+    /**
+     * Helper method to identify GPU memory exceptions
+     */
+    private static boolean isGPUMemoryException(Exception e) {
+        Throwable cause = e;
+        while (cause != null) {
+            if (cause instanceof uk.ac.manchester.tornado.api.exceptions.TornadoOutOfMemoryException ||
+                (cause.getMessage() != null && (
+                    cause.getMessage().contains("Unable to allocate") ||
+                    cause.getMessage().contains("CL_OUT_OF_RESOURCES") ||
+                    cause.getMessage().contains("CL_MEM_OBJECT_ALLOCATION_FAILURE") ||
+                    cause.getMessage().contains("out of memory") ||
+                    cause.getMessage().toLowerCase().contains("memory")
+                ))) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        return false;
+    }
+
+    /**
+     * Cleanup method for streaming resources
+     */
+    private static void cleanupStreamingResources() {
+        try {
+            // Force GPU garbage collection if possible
+            System.gc(); // Trigger JVM GC first
+
+            // Clear buffer pools to free GPU memory
+            INPUT_BUFFER_POOLS.clear();
+            OUTPUT_BUFFER_POOLS.clear();
+
+            // Clear conversion cache to free memory
+            CONVERSION_CACHE.clear();
+
+            logger.info("[GPU-CONVERT-HYBRID] Cleaned up streaming resources");
+        } catch (Exception e) {
+            logger.warning("[GPU-CONVERT-HYBRID] Error during cleanup: " + e.getMessage());
+        }
+    }
+
 }

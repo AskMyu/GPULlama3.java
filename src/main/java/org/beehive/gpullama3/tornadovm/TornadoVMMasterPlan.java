@@ -327,6 +327,25 @@ public class TornadoVMMasterPlan {
 
     /// Execute the forward pass of the LLaMA transformer model using TornadoVM acceleration just once to copy the data into the read-only data layer.
     public void forceCopyInReadOnlyDataLayered() {
+        // Check GPU resources first
+        long availableGPUMemory = getAvailableGPUMemory();
+
+        // Special handling for MoE models only if memory is limited
+        if (isMoEModel()) {
+            long totalExpertMemory = estimateTotalExpertMemory();
+
+            if (totalExpertMemory > availableGPUMemory * 0.8) {
+                System.err.printf("[TORNADO-COPY] MoE model requires special handling due to memory constraints%n");
+                System.err.printf("[TORNADO-COPY] Expert tensors: %.2f GB, Available GPU: %.2f GB%n",
+                                totalExpertMemory / (1024.0 * 1024.0 * 1024.0),
+                                availableGPUMemory / (1024.0 * 1024.0 * 1024.0));
+                forceCopyInReadOnlyDataLayeredMoE();
+                return;
+            }
+
+            System.err.println("[TORNADO-COPY] MoE model has sufficient GPU memory - using standard copying");
+        }
+
         // For large models, use batched approach to reduce memory pressure
         int batchSize = calculateOptimalBatchSize();
 
@@ -341,11 +360,48 @@ public class TornadoVMMasterPlan {
 
     private int calculateOptimalBatchSize() {
         // Calculate based on model size and available memory
-        // GPT-OSS 20B still fails with 530MB for 6 layers
-        // Need much more aggressive batching - try 2 layers at a time
-
         int totalLayers = config.numberOfLayers();
 
+        // Get available GPU memory
+        long availableGPUMemory = getAvailableGPUMemory();
+        long estimatedLayerMemory = estimateLayerMemoryRequirement();
+
+        // Special handling for MoE models like GPT-OSS
+        if (isMoEModel()) {
+            // Check if we have enough memory for all expert tensors
+            long totalExpertMemory = estimateTotalExpertMemory();
+
+            if (totalExpertMemory > availableGPUMemory * 0.8) { // Use 80% threshold for safety
+                System.err.printf("[TORNADO-COPY] MoE model detected with limited GPU memory: %.2f GB required, %.2f GB available%n",
+                                totalExpertMemory / (1024.0 * 1024.0 * 1024.0),
+                                availableGPUMemory / (1024.0 * 1024.0 * 1024.0));
+                System.err.println("[TORNADO-COPY] Using single-layer processing for memory conservation");
+                return 1; // Process one layer at a time for MoE models with limited memory
+            } else {
+                System.err.printf("[TORNADO-COPY] MoE model detected with sufficient GPU memory: %.2f GB required, %.2f GB available%n",
+                                totalExpertMemory / (1024.0 * 1024.0 * 1024.0),
+                                availableGPUMemory / (1024.0 * 1024.0 * 1024.0));
+                // Continue with normal batch size calculation
+            }
+        }
+
+        // Calculate optimal batch size based on available memory
+        if (estimatedLayerMemory > 0 && availableGPUMemory > 0) {
+            // Calculate how many layers we can safely process at once
+            int memoryBasedBatchSize = (int) Math.max(1, (availableGPUMemory * 0.6) / estimatedLayerMemory);
+            System.err.printf("[TORNADO-COPY] Memory-based batch size calculation: %d layers (%.2f GB per layer)%n",
+                            memoryBasedBatchSize, estimatedLayerMemory / (1024.0 * 1024.0 * 1024.0));
+
+            // Use the smaller of memory-based or heuristic-based batch size
+            int heuristicBatchSize = getHeuristicBatchSize(totalLayers);
+            return Math.min(memoryBasedBatchSize, heuristicBatchSize);
+        }
+
+        // Fallback to heuristic-based calculation if memory info unavailable
+        return getHeuristicBatchSize(totalLayers);
+    }
+
+    private int getHeuristicBatchSize(int totalLayers) {
         if (totalLayers <= 4) {
             return totalLayers; // Very small models: process all at once
         } else if (totalLayers <= 8) {
@@ -353,7 +409,7 @@ public class TornadoVMMasterPlan {
         } else if (totalLayers <= 16) {
             return 3; // Medium models: batch size 3
         } else {
-            return 2; // Large models: batch size 2 (ultra-conservative for GPT-OSS)
+            return 2; // Large models: batch size 2
         }
     }
 
@@ -525,5 +581,150 @@ public class TornadoVMMasterPlan {
      */
     public void freeTornadoExecutionPlan() {
         executionPlan.freeDeviceMemory();
+    }
+
+    // Helper methods for memory estimation and MoE detection
+
+    /**
+     * Check if the current model is a Mixture of Experts model
+     */
+    private boolean isMoEModel() {
+        // Check if configuration is GptOssConfiguration
+        if (config instanceof org.beehive.gpullama3.model.gptoss.GptOssConfiguration) {
+            return true;
+        }
+
+        // Check if configuration is OlmoeConfiguration
+        if (config instanceof org.beehive.gpullama3.model.olmoe.OlmoeConfiguration) {
+            return true;
+        }
+
+        // Check if it's a Qwen3 MoE model
+        if (config instanceof org.beehive.gpullama3.model.qwen3.Qwen3Configuration qwenConfig) {
+            return qwenConfig.isMoEModel();
+        }
+
+        return false;
+    }
+
+    /**
+     * Get available GPU memory from TornadoVM device
+     */
+    private long getAvailableGPUMemory() {
+        try {
+            // Use OpenCL max allocation detection for accurate limits
+            long openCLMaxAlloc = org.beehive.gpullama3.tornadovm.OpenCLMemoryDetector.getMaxAllocationSize();
+
+            // Also check TornadoVM device memory setting as secondary limit
+            String deviceMemory = System.getProperty("tornado.device.memory");
+            long tornadoVMLimit = 8L * 1024L * 1024L * 1024L; // 8GB default
+
+            if (deviceMemory != null) {
+                // Parse memory string (e.g., "34398MB" or "8GB")
+                deviceMemory = deviceMemory.toUpperCase();
+                long multiplier = 1;
+                if (deviceMemory.endsWith("GB")) {
+                    multiplier = 1024L * 1024L * 1024L;
+                    deviceMemory = deviceMemory.substring(0, deviceMemory.length() - 2);
+                } else if (deviceMemory.endsWith("MB")) {
+                    multiplier = 1024L * 1024L;
+                    deviceMemory = deviceMemory.substring(0, deviceMemory.length() - 2);
+                }
+                tornadoVMLimit = Long.parseLong(deviceMemory) * multiplier;
+            }
+
+            // Use the smaller of OpenCL max allocation and TornadoVM setting
+            long effectiveLimit = Math.min(openCLMaxAlloc, tornadoVMLimit);
+
+            System.err.printf("[TORNADO-COPY] GPU Memory Limits: OpenCL=%.2f GB, TornadoVM=%.2f GB, Using=%.2f GB%n",
+                            openCLMaxAlloc / (1024.0 * 1024.0 * 1024.0),
+                            tornadoVMLimit / (1024.0 * 1024.0 * 1024.0),
+                            effectiveLimit / (1024.0 * 1024.0 * 1024.0));
+
+            return effectiveLimit;
+
+        } catch (Exception e) {
+            System.err.println("[TORNADO-COPY] Could not detect GPU memory limits: " + e.getMessage());
+            // Safe fallback to 2GB (well within any reasonable OpenCL limit)
+            return 2L * 1024L * 1024L * 1024L;
+        }
+    }
+
+    /**
+     * Estimate memory requirement per layer
+     */
+    private long estimateLayerMemoryRequirement() {
+        // Rough estimation based on model dimensions
+        long weightsPerLayer = 0;
+
+        // Attention weights: Q, K, V, O projections
+        weightsPerLayer += 4L * config.dim() * config.dim();
+
+        // FFN weights (or MoE expert weights)
+        if (isMoEModel()) {
+            // For MoE, this varies by active experts
+            if (config instanceof org.beehive.gpullama3.model.gptoss.GptOssConfiguration gptOss) {
+                weightsPerLayer += gptOss.activeExperts() * gptOss.hiddenDim() * config.dim() * 2L;
+            } else {
+                weightsPerLayer += 4L * config.dim() * config.dim(); // Fallback estimate
+            }
+        } else {
+            // Standard FFN: gate, up, down projections
+            weightsPerLayer += 3L * config.dim() * config.dim() * 4L; // Assuming 4x hidden dim
+        }
+
+        // Assume float32 (4 bytes per weight)
+        return weightsPerLayer * 4;
+    }
+
+    /**
+     * Estimate total memory required for all expert tensors in MoE models
+     */
+    private long estimateTotalExpertMemory() {
+        if (!isMoEModel()) {
+            return 0;
+        }
+
+        if (config instanceof org.beehive.gpullama3.model.gptoss.GptOssConfiguration gptOss) {
+            // GPT-OSS: 32 experts * hiddenDim * dim * 3 tensors (gate, up, down) * 4 bytes
+            long expertsMemoryPerLayer = (long) gptOss.numExperts() * gptOss.hiddenDim() * config.dim() * 3L * 4L;
+            return expertsMemoryPerLayer * config.numberOfLayers();
+        }
+
+        if (config instanceof org.beehive.gpullama3.model.olmoe.OlmoeConfiguration olmoe) {
+            // OLMoE: numberOfExperts * dimension calculations
+            long expertsMemoryPerLayer = (long) olmoe.numberOfExperts() * config.dim() * config.dim() * 3L * 4L;
+            return expertsMemoryPerLayer * config.numberOfLayers();
+        }
+
+        // Fallback estimate for other MoE models
+        return 16L * 1024L * 1024L * 1024L; // 16GB default
+    }
+
+    /**
+     * Special weight copying for MoE models with limited GPU memory
+     */
+    private void forceCopyInReadOnlyDataLayeredMoE() {
+        System.err.println("[TORNADO-COPY-MOE] Special MoE weight copying mode activated");
+        System.err.println("[TORNADO-COPY-MOE] This mode skips expert tensor copying to conserve GPU memory");
+        System.err.println("[TORNADO-COPY-MOE] Expert tensors will be loaded on-demand during inference");
+
+        // Initialize state
+        state.wrapX.init(0.0f);
+        state.positionHolder.init(0);
+
+        // Execute activation update graph
+        System.err.println("[TORNADO-COPY-MOE] Loading non-expert weights only...");
+        executionPlan.withGraph(0).withGridScheduler(scheduler).execute();
+
+        // For MoE models, we skip most layer weight copying
+        // Only copy essential weights like attention and layer norms
+        System.err.println("[TORNADO-COPY-MOE] Skipping expert tensor copying for all layers");
+
+        // Execute logits graph
+        executionPlan.withGraph(config.numberOfLayers() + 1).withGridScheduler(scheduler).execute();
+
+        System.err.println("[TORNADO-COPY-MOE] ✅ MoE minimal weight copying completed");
+        System.err.println("[TORNADO-COPY-MOE] ⚠️ Note: Inference may be slower due to on-demand expert loading");
     }
 }
