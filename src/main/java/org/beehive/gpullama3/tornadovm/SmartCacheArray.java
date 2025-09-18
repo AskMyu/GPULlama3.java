@@ -2,27 +2,34 @@ package org.beehive.gpullama3.tornadovm;
 
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
+import org.beehive.gpullama3.tornadovm.OpenCLMemoryDetector;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Smart cache array that automatically handles >2GB allocations through TornadoVM batch processing.
- * 
- * For arrays that exceed the TornadoVM FloatArray limit (~2GB), this class automatically
- * splits them into manageable batches while maintaining a transparent API for existing code.
- * 
+ * Smart cache array that automatically handles large allocations through dynamic OpenCL-aware batch processing.
+ *
+ * This class automatically detects OpenCL device memory limits and splits large arrays into
+ * manageable batches while maintaining a transparent API for existing code.
+ *
  * Key features:
  * - Transparent API matching FloatArray
- * - Automatic small/large array detection
- * - 512MB batches for optimal GPU memory usage
+ * - Dynamic OpenCL memory limit detection
+ * - Intelligent batching based on actual GPU constraints
  * - Zero performance impact for small arrays
  * - Full backward compatibility
+ * - Automatic adaptation to different GPU configurations
  */
 public class SmartCacheArray {
     
-    // TornadoVM FloatArray theoretical limit (Integer.MAX_VALUE bytes)
-    private static final long MAX_SINGLE_ARRAY_BYTES = Integer.MAX_VALUE - 1024L; // Safety margin
-    private static final long BATCH_SIZE_BYTES = 512L * 1024 * 1024; // 512MB batches
-    private static final int BATCH_SIZE_FLOATS = (int)(BATCH_SIZE_BYTES / 4);
+    // Dynamic OpenCL-aware memory limits (detected at runtime)
+    private static volatile boolean limitsInitialized = false;
+    private static volatile long dynamicMaxAllocationBytes;
+    private static volatile long dynamicBatchSizeBytes;
+    private static volatile int dynamicBatchSizeFloats;
+
+    // Fallback limits for when OpenCL detection fails
+    private static final long FALLBACK_MAX_ALLOCATION_BYTES = Integer.MAX_VALUE - 1024L; // 2GB safety
+    private static final long FALLBACK_BATCH_SIZE_BYTES = 512L * 1024 * 1024; // 512MB batches
     
     // Core data structures
     private final FloatArray[] batches;
@@ -47,10 +54,13 @@ public class SmartCacheArray {
         this.totalSize = totalSize;
         this.creationTime = System.nanoTime();
         
+        // Initialize OpenCL-aware limits if needed
+        initializeLimits();
+
         // Calculate total memory requirement
         long totalBytes = (long) totalSize * 4L + 24L; // 24 bytes TornadoVM header
-        
-        if (totalBytes <= MAX_SINGLE_ARRAY_BYTES) {
+
+        if (totalBytes <= dynamicMaxAllocationBytes) {
             // Standard allocation for small arrays
             this.batches = new FloatArray[]{new FloatArray(totalSize)};
             this.numBatches = 1;
@@ -60,14 +70,18 @@ public class SmartCacheArray {
             System.out.printf("[SMART-CACHE] Standard allocation: %d floats (%.1f MB)%n", 
                             totalSize, totalBytes / (1024.0 * 1024.0));
         } else {
-            // Batch allocation for large arrays
-            this.numBatches = (totalSize + BATCH_SIZE_FLOATS - 1) / BATCH_SIZE_FLOATS;
+            // Batch allocation for large arrays using dynamic batch size
+            this.numBatches = (totalSize + dynamicBatchSizeFloats - 1) / dynamicBatchSizeFloats;
             this.batches = new FloatArray[numBatches];
             this.isBatched = true;
-            
-            // Create batches
+
+            System.out.printf("[SMART-CACHE] Large allocation detected: %.1f MB > %.1f MB limit%n",
+                            totalBytes / (1024.0 * 1024.0),
+                            dynamicMaxAllocationBytes / (1024.0 * 1024.0));
+
+            // Create batches using OpenCL-aware batch size
             for (int i = 0; i < numBatches; i++) {
-                int batchSize = Math.min(BATCH_SIZE_FLOATS, totalSize - i * BATCH_SIZE_FLOATS);
+                int batchSize = Math.min(dynamicBatchSizeFloats, totalSize - i * dynamicBatchSizeFloats);
                 this.batches[i] = new FloatArray(batchSize);
             }
             
@@ -75,8 +89,9 @@ public class SmartCacheArray {
             this.batchManager = (topology != null) ? 
                 new BatchCacheManager(topology, batches) : null;
             
-            System.out.printf("[SMART-CACHE] Batched allocation: %d floats (%.1f MB) in %d batches%n",
-                            totalSize, totalBytes / (1024.0 * 1024.0), numBatches);
+            System.out.printf("[SMART-CACHE] Batched allocation: %d floats (%.1f MB) in %d batches of %.1f MB each%n",
+                            totalSize, totalBytes / (1024.0 * 1024.0), numBatches,
+                            dynamicBatchSizeBytes / (1024.0 * 1024.0));
         }
     }
     
@@ -85,6 +100,43 @@ public class SmartCacheArray {
      */
     public SmartCacheArray(int totalSize) {
         this(totalSize, null);
+    }
+
+    /**
+     * Initialize OpenCL memory limits dynamically.
+     * Called once per application session.
+     */
+    private static synchronized void initializeLimits() {
+        if (limitsInitialized) {
+            return;
+        }
+
+        try {
+            // Detect OpenCL capabilities
+            long maxAlloc = OpenCLMemoryDetector.getMaxAllocationSize();
+            long batchSize = OpenCLMemoryDetector.getRecommendedBatchSize();
+
+            // Apply detected limits
+            dynamicMaxAllocationBytes = maxAlloc;
+            dynamicBatchSizeBytes = batchSize;
+            dynamicBatchSizeFloats = (int)(batchSize / 4);
+
+            System.out.printf("[SMART-CACHE] OpenCL limits detected: Max=%.2f GB, Batch=%.1f MB%n",
+                            maxAlloc / (1024.0 * 1024.0 * 1024.0),
+                            batchSize / (1024.0 * 1024.0));
+
+        } catch (Exception e) {
+            // Fallback to safe defaults
+            dynamicMaxAllocationBytes = FALLBACK_MAX_ALLOCATION_BYTES;
+            dynamicBatchSizeBytes = FALLBACK_BATCH_SIZE_BYTES;
+            dynamicBatchSizeFloats = (int)(FALLBACK_BATCH_SIZE_BYTES / 4);
+
+            System.out.printf("[SMART-CACHE] OpenCL detection failed, using fallbacks: Max=%.2f GB, Batch=%.1f MB%n",
+                            FALLBACK_MAX_ALLOCATION_BYTES / (1024.0 * 1024.0 * 1024.0),
+                            FALLBACK_BATCH_SIZE_BYTES / (1024.0 * 1024.0));
+        }
+
+        limitsInitialized = true;
     }
     
     // ================================================================================
@@ -103,8 +155,8 @@ public class SmartCacheArray {
         }
         
         // Calculate batch and local index
-        int batchIndex = index / BATCH_SIZE_FLOATS;
-        int localIndex = index % BATCH_SIZE_FLOATS;
+        int batchIndex = index / dynamicBatchSizeFloats;
+        int localIndex = index % dynamicBatchSizeFloats;
         
         if (batchIndex >= numBatches) {
             throw new IndexOutOfBoundsException("Index " + index + " exceeds array size " + totalSize);
@@ -127,8 +179,8 @@ public class SmartCacheArray {
         }
         
         // Calculate batch and local index
-        int batchIndex = index / BATCH_SIZE_FLOATS;
-        int localIndex = index % BATCH_SIZE_FLOATS;
+        int batchIndex = index / dynamicBatchSizeFloats;
+        int localIndex = index % dynamicBatchSizeFloats;
         
         if (batchIndex >= numBatches) {
             throw new IndexOutOfBoundsException("Index " + index + " exceeds array size " + totalSize);
@@ -184,7 +236,8 @@ public class SmartCacheArray {
      * Get the size of a standard batch (except possibly the last one).
      */
     public int getBatchSize() {
-        return BATCH_SIZE_FLOATS;
+        initializeLimits();
+        return dynamicBatchSizeFloats;
     }
     
     /**
@@ -224,7 +277,7 @@ public class SmartCacheArray {
         if (globalIndex >= totalSize || globalIndex < 0) {
             throw new IndexOutOfBoundsException("Index " + globalIndex + " out of range [0, " + totalSize + ")");
         }
-        return isBatched ? (globalIndex / BATCH_SIZE_FLOATS) : 0;
+        return isBatched ? (globalIndex / dynamicBatchSizeFloats) : 0;
     }
     
     /**
@@ -234,7 +287,7 @@ public class SmartCacheArray {
         if (globalIndex >= totalSize || globalIndex < 0) {
             throw new IndexOutOfBoundsException("Index " + globalIndex + " out of range [0, " + totalSize + ")");
         }
-        return isBatched ? (globalIndex % BATCH_SIZE_FLOATS) : globalIndex;
+        return isBatched ? (globalIndex % dynamicBatchSizeFloats) : globalIndex;
     }
     
     /**
