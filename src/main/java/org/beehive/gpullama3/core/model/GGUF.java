@@ -62,7 +62,7 @@ public final class GGUF {
         for (Map.Entry<String, GGUFTensorInfo> entry : tensorInfos.entrySet()) {
             GGUFTensorInfo ti = entry.getValue();
             int numberOfElements = FloatTensor.numberOfElements(ti.dimensions());
-            int sizeInBytes = Math.toIntExact(ti.ggmlType().byteSizeFor(numberOfElements));
+            long sizeInBytes = ti.ggmlType().byteSizeFor(numberOfElements);
             MemorySegment memorySegment = tensorData.asSlice(ti.offset(), sizeInBytes);
             tensorEntries.put(ti.name(), new GGMLTensorEntry(tensorData, ti.name(), ti.ggmlType(), ti.dimensions(), memorySegment));
         }

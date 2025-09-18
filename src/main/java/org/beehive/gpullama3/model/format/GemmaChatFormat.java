@@ -62,7 +62,13 @@ public class GemmaChatFormat implements ChatFormat {
     public int getBeginOfText() {
         // Return BOS token if available
         Map<String, Integer> specialTokens = tokenizer.getSpecialTokens();
-        return specialTokens.getOrDefault("<bos>", specialTokens.getOrDefault("<|bos|>", 1));
+
+        System.err.printf("[OLMOE-BOS-DEBUG] Available special tokens: %s%n", specialTokens);
+
+        int bosToken = specialTokens.getOrDefault("<bos>", specialTokens.getOrDefault("<|bos|>", 1));
+        System.err.printf("[OLMOE-BOS-DEBUG] Selected BOS token: %d%n", bosToken);
+
+        return bosToken;
     }
     
     @Override

@@ -543,7 +543,7 @@ public final class InferenceEngine {
         // Main generation loop
         while (pos < actualMaxTokens) {
             // GPU Forward Pass - No conditional check since we know we're using GPU
-            //System.out.println("currentToken: " + currentToken);
+            System.err.printf("[INFERENCE-DEBUG] About to call forwardTornadoVM: currentToken=%d, pos=%d%n", currentToken, pos);
             FloatArray logits = InferenceCore.forwardTornadoVM(model, state, currentToken, pos, tornadoVMPlan);
 
             // Process prompt tokens if still remaining

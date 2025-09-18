@@ -2179,12 +2179,20 @@ public final class InferenceCore {
                     state.wrapX.set(i, visionEmbedding.get(i));
                 }
             } else {
-                // Fallback to standard token embedding lookup
-                MemorySegment.copy(weights.tokenEmbeddingTable.getSegment(), token * configuration.dim() * Float.BYTES, state.wrapX.getSegment(), 0, configuration.dim() * Float.BYTES);
+                // Fallback to standard token embedding lookup with bounds check
+                if (token < 0 || token >= configuration.vocabularySize()) {
+                    throw new IllegalArgumentException(String.format("Invalid token ID: %d (valid range: 0-%d)", token, configuration.vocabularySize() - 1));
+                }
+                MemorySegment.copy(weights.tokenEmbeddingTable.getSegment(), (long)token * configuration.dim() * Float.BYTES, state.wrapX.getSegment(), 0, configuration.dim() * Float.BYTES);
             }
         } else {
-            // Standard token embedding lookup for text tokens
-            MemorySegment.copy(weights.tokenEmbeddingTable.getSegment(), token * configuration.dim() * Float.BYTES, state.wrapX.getSegment(), 0, configuration.dim() * Float.BYTES);
+            // Standard token embedding lookup for text tokens with bounds check
+            if (token < 0 || token >= configuration.vocabularySize()) {
+                System.err.printf("[TOKENIZATION-DEBUG] Invalid token ID: %d (valid range: 0-%d)%n", token, configuration.vocabularySize() - 1);
+                System.err.printf("[TOKENIZATION-DEBUG] Position: %d%n", position);
+                throw new IllegalArgumentException(String.format("Invalid token ID: %d (valid range: 0-%d)", token, configuration.vocabularySize() - 1));
+            }
+            MemorySegment.copy(weights.tokenEmbeddingTable.getSegment(), (long)token * configuration.dim() * Float.BYTES, state.wrapX.getSegment(), 0, configuration.dim() * Float.BYTES);
         }
 
         return tornadoVMMasterPlan.tornadoVMForwardExecuteLayered(position);

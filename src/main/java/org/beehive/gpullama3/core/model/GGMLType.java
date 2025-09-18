@@ -40,7 +40,12 @@ public enum GGMLType {
     Q4_0_4_8(GGMLType.FLOAT16_BYTES + 16 * Byte.BYTES, 32),
     Q4_0_8_8(GGMLType.FLOAT16_BYTES + 16 * Byte.BYTES, 32),
     TQ1_0(Integer.MAX_VALUE),
-    TQ2_0(Integer.MAX_VALUE);
+    TQ2_0(Integer.MAX_VALUE),
+    // Additional quantization types (2025) - IDs 36+
+    UNUSED_36(Integer.MAX_VALUE),
+    UNUSED_37(Integer.MAX_VALUE),
+    UNUSED_38(Integer.MAX_VALUE),
+    IQ3_T(2 * GGMLType.FLOAT16_BYTES + GGMLType.QK_K * 3 / 8, GGMLType.QK_K); // Type ID 39 - 3-bit i-quantization (~3 bits per weight)
 
     public static final int BFLOAT16_BYTES = 2;
     public static final int FLOAT16_BYTES = 2;
@@ -70,7 +75,7 @@ public enum GGMLType {
     public long byteSizeFor(int numberOfElements) {
         long t = numberOfElements * (long) getTypeSize();
         assert t % getBlockSize() == 0;
-        return Math.toIntExact(t / getBlockSize());
+        return t / getBlockSize(); // Return long directly, no integer conversion
     }
 
     public static final int QK_K = 256; // or 64?
