@@ -389,16 +389,23 @@ public class TornadoVMMasterPlan {
             }
         }
 
-        // Calculate optimal batch size based on available memory
+        // Calculate optimal batch size based on available memory (PRIORITY: Memory first!)
         if (estimatedLayerMemory > 0 && availableGPUMemory > 0) {
             // Calculate how many layers we can safely process at once
             int memoryBasedBatchSize = (int) Math.max(1, (availableGPUMemory * 0.6) / estimatedLayerMemory);
-            System.err.printf("[TORNADO-COPY] Memory-based batch size calculation: %d layers (%.2f GB per layer)%n",
-                            memoryBasedBatchSize, estimatedLayerMemory / (1024.0 * 1024.0 * 1024.0));
+            System.err.printf("[TORNADO-COPY] Memory-based batch size calculation: %d layers (%.2f GB per layer, %.2f GB available)%n",
+                            memoryBasedBatchSize, estimatedLayerMemory / (1024.0 * 1024.0 * 1024.0),
+                            availableGPUMemory / (1024.0 * 1024.0 * 1024.0));
 
-            // Use the smaller of memory-based or heuristic-based batch size
-            int heuristicBatchSize = getHeuristicBatchSize(totalLayers);
-            return Math.min(memoryBasedBatchSize, heuristicBatchSize);
+            // PRIORITY 1: If memory allows all layers, process all at once (override heuristics)
+            if (memoryBasedBatchSize >= totalLayers) {
+                System.err.printf("[TORNADO-COPY] ✅ GPU memory sufficient for all %d layers - processing all at once%n", totalLayers);
+                return totalLayers;
+            }
+
+            // PRIORITY 2: Memory is constrained - use memory-based calculation
+            System.err.printf("[TORNADO-COPY] ⚠️ GPU memory constrains batch size to %d layers%n", memoryBasedBatchSize);
+            return memoryBasedBatchSize;
         }
 
         // Fallback to heuristic-based calculation if memory info unavailable
@@ -406,15 +413,77 @@ public class TornadoVMMasterPlan {
     }
 
     private int getHeuristicBatchSize(int totalLayers) {
-        if (totalLayers <= 4) {
-            return totalLayers; // Very small models: process all at once
-        } else if (totalLayers <= 8) {
-            return 4; // Small models: batch size 4
-        } else if (totalLayers <= 16) {
-            return 3; // Medium models: batch size 3
+        // Calculate approximate model size based on parameters
+        long approxModelParams = estimateModelParameters();
+        double modelSizeGB = (approxModelParams * 4.0) / (1024.0 * 1024.0 * 1024.0); // 4 bytes per float
+
+        System.err.printf("[TORNADO-COPY] Model size estimation: %.1f billion params, %.2f GB%n",
+                          approxModelParams / 1_000_000_000.0, modelSizeGB);
+
+        // Use actual model size rather than just layer count for batching decisions
+        if (modelSizeGB <= 4.0) {
+            // Small models (≤4GB): Process all layers at once
+            System.err.printf("[TORNADO-COPY] Small model detected (%.2f GB) - processing all %d layers at once%n",
+                              modelSizeGB, totalLayers);
+            return totalLayers;
+        } else if (modelSizeGB <= 8.0) {
+            // Medium models (4-8GB): Batch size based on layer count
+            int batchSize = Math.max(4, totalLayers / 4);
+            System.err.printf("[TORNADO-COPY] Medium model detected (%.2f GB) - batch size %d%n",
+                              modelSizeGB, batchSize);
+            return Math.min(batchSize, totalLayers);
+        } else if (modelSizeGB <= 16.0) {
+            // Large models (8-16GB): Conservative batching
+            int batchSize = Math.max(3, totalLayers / 6);
+            System.err.printf("[TORNADO-COPY] Large model detected (%.2f GB) - batch size %d%n",
+                              modelSizeGB, batchSize);
+            return Math.min(batchSize, totalLayers);
         } else {
-            return 2; // Large models: batch size 2
+            // Very large models (>16GB): Very conservative batching
+            int batchSize = Math.max(2, totalLayers / 8);
+            System.err.printf("[TORNADO-COPY] Very large model detected (%.2f GB) - batch size %d%n",
+                              modelSizeGB, batchSize);
+            return Math.min(batchSize, totalLayers);
         }
+    }
+
+    /**
+     * Estimate total model parameters for more accurate size-based batching decisions
+     */
+    private long estimateModelParameters() {
+        long totalParams = 0;
+
+        // Embedding parameters (vocabulary × dimension)
+        totalParams += (long) config.vocabularySize() * config.dim();
+
+        // Layer parameters (attention + FFN for each layer)
+        for (int i = 0; i < config.numberOfLayers(); i++) {
+            // Attention parameters: Q, K, V, O projections
+            totalParams += 4L * config.dim() * config.dim();
+
+            // Layer norm parameters
+            totalParams += 2L * config.dim(); // Pre-attention and post-FFN
+
+            // FFN parameters
+            if (isMoEModel()) {
+                // For MoE models, estimate based on active experts
+                if (config instanceof org.beehive.gpullama3.model.gptoss.GptOssConfiguration gptOss) {
+                    totalParams += gptOss.numExperts() * gptOss.hiddenDim() * config.dim() * 2L;
+                } else {
+                    // Fallback for unknown MoE configurations
+                    totalParams += 8L * config.hiddenDim() * config.dim(); // Assume 8 experts avg
+                }
+            } else {
+                // Standard FFN: up_proj + down_proj
+                totalParams += 2L * config.dim() * config.hiddenDim();
+            }
+        }
+
+        // Final layer norm and output projection
+        totalParams += config.dim(); // Final layer norm
+        totalParams += (long) config.vocabularySize() * config.dim(); // Output projection (may be tied)
+
+        return totalParams;
     }
 
     private void forceCopyInReadOnlyDataLayeredAllAtOnce() {
