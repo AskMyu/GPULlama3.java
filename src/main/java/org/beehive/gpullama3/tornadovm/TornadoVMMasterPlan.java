@@ -144,6 +144,10 @@ public class TornadoVMMasterPlan {
                 System.err.println("[TORNADO-PLANNER] Using Qwen3TornadoVMLayerPlanner");
                 yield new Qwen3TornadoVMLayerPlanner((Qwen3State) state, model);
             }
+            case GEMMA_2 -> {
+                System.err.println("[TORNADO-PLANNER] ✅ Using standard TornadoVMLayerPlanner for GEMMA_2 (compatibility mode)");
+                yield new TornadoVMLayerPlanner(state, model);
+            }
             case GEMMA_3 -> {
                 System.err.println("[TORNADO-PLANNER] ✅ Using GemmaTornadoVMLayerPlanner for GEMMA_3");
                 yield new GemmaTornadoVMLayerPlanner((GemmaState) state, model);

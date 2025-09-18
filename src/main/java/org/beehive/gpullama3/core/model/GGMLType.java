@@ -14,9 +14,9 @@ public enum GGMLType {
     Q8_1(32 * Byte.BYTES + 2 * Float.BYTES, 32),
     // k-quantizations
     Q2_K(Integer.MAX_VALUE),
-    Q3_K(Integer.MAX_VALUE),
+    Q3_K(110, 256), // 110 bytes per block, 256 elements per block = 3.4375 bpw
     Q4_K(2 * GGMLType.FLOAT16_BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 2, GGMLType.QK_K),
-    Q5_K(2 * GGMLType.FLOAT16_BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 8 + GGMLType.QK_K / 2, GGMLType.QK_K),
+    Q5_K(176, 256), // 2*FP16 + 12*scales + 128*qs + 32*qh = 176 bytes for 256 elements = 5.5 bpw
     Q6_K(GGMLType.QK_K / 2 + GGMLType.QK_K / 4 + GGMLType.QK_K / 16 + GGMLType.FLOAT16_BYTES, GGMLType.QK_K),
     Q8_K(4 + GGMLType.QK_K + (GGMLType.QK_K / 16) * 2, GGMLType.QK_K), // float d + int8[QK_K] + int16[QK_K/16]
 

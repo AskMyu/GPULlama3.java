@@ -2,6 +2,7 @@ package org.beehive.gpullama3.model;
 
 import org.beehive.gpullama3.core.model.GGUF;
 import org.beehive.gpullama3.model.loader.GemmaModelLoader;
+import org.beehive.gpullama3.model.loader.Gemma2ModelLoader;
 import org.beehive.gpullama3.model.loader.GptOssModelLoader;
 import org.beehive.gpullama3.model.loader.GraniteModelLoader;
 import org.beehive.gpullama3.model.loader.LlamaModelLoader;
@@ -67,6 +68,13 @@ public enum ModelType {
         @Override
         public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
             return new Phi3ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
+    GEMMA_2 {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new Gemma2ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
         }
     },
 
@@ -158,5 +166,9 @@ public enum ModelType {
     
     public boolean isVisionLanguageModel() {
         return this == LLAVA_LLAMA_3_8B || this == LLAVA_LLAMA_3_8B_INT4;
+    }
+
+    public boolean isGemma() {
+        return this == GEMMA_2 || this == GEMMA_3;
     }
 }

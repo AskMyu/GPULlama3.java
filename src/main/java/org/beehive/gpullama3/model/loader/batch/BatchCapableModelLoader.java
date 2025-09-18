@@ -231,7 +231,7 @@ public abstract class BatchCapableModelLoader extends ModelLoader {
         return switch (entry.ggmlType()) {
             case F32 -> 4;
             case F16 -> 2;
-            case Q4_0, Q4_1, Q4_K -> 1;
+            case Q3_K, Q4_0, Q4_1, Q4_K, Q5_K -> 1;
             case Q8_0, Q8_1, Q8_K -> 1;
             case IQ3_T -> 1;
             default -> 2;

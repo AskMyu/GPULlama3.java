@@ -5,6 +5,7 @@ import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import org.beehive.gpullama3.model.Configuration;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
+import org.beehive.gpullama3.tornadovm.SmartCacheArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 import java.util.stream.Stream;
@@ -70,9 +71,12 @@ public final class GemmaState extends State {
         fields.wrapK = new FloatArray(config.dim());
         fields.wrapV = new FloatArray(config.dim());
 
-        // Key/value cache wrappers
-        fields.wrapKeyCache = new FloatArray(config.contextLength() * kvDim * config.numberOfLayers());
-        fields.wrapValueCache = new FloatArray(config.contextLength() * kvDim * config.numberOfLayers());
+        // Key/value cache wrappers - use SmartCacheArray to handle >2GB allocations
+        int cacheSize = config.contextLength() * kvDim * config.numberOfLayers();
+        System.out.printf("[GEMMA-STATE] Creating key/value caches: %d floats (%.2f GB each)%n",
+                        cacheSize, (cacheSize * 4.0) / (1024 * 1024 * 1024));
+        fields.wrapKeyCache = new SmartCacheArray(cacheSize);
+        fields.wrapValueCache = new SmartCacheArray(cacheSize);
         // NOTE: Avoiding .init(0.f) calls to prevent TornadoVM memory bounds violations
         // Arrays are automatically initialized to 0.0f
         
