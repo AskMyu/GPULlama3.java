@@ -144,10 +144,6 @@ public class TornadoVMMasterPlan {
                 System.err.println("[TORNADO-PLANNER] Using Qwen3TornadoVMLayerPlanner");
                 yield new Qwen3TornadoVMLayerPlanner((Qwen3State) state, model);
             }
-            case GEMMA_2 -> {
-                System.err.println("[TORNADO-PLANNER] ✅ Using standard TornadoVMLayerPlanner for GEMMA_2 (compatibility mode)");
-                yield new TornadoVMLayerPlanner(state, model);
-            }
             case GEMMA_3 -> {
                 System.err.println("[TORNADO-PLANNER] ✅ Using GemmaTornadoVMLayerPlanner for GEMMA_3");
                 yield new GemmaTornadoVMLayerPlanner((GemmaState) state, model);
@@ -350,66 +346,80 @@ public class TornadoVMMasterPlan {
             System.err.println("[TORNADO-COPY] MoE model has sufficient GPU memory - using standard copying");
         }
 
-        // For large models, use batched approach to reduce memory pressure
-        int batchSize = calculateOptimalBatchSize();
-
-        if (batchSize >= config.numberOfLayers()) {
-            // Execute all layers at once for small models
-            forceCopyInReadOnlyDataLayeredAllAtOnce();
-        } else {
-            // Execute in batches for large models
-            forceCopyInReadOnlyDataLayeredInBatches(batchSize);
-        }
+        // Simple approach: execute all layers at once (original working behavior)
+        // Complex batching was unnecessary - the real issue was model-specific vocabulary limits
+        forceCopyInReadOnlyDataLayeredAllAtOnce();
     }
 
     private int calculateOptimalBatchSize() {
-        // Calculate based on model size and available memory
+        // Calculate based on ACTUAL memory requirements vs OpenCL limits
         int totalLayers = config.numberOfLayers();
 
-        // Get available GPU memory
-        long availableGPUMemory = getAvailableGPUMemory();
-        long estimatedLayerMemory = estimateLayerMemoryRequirement();
+        // Get the REAL constraint - OpenCL max single allocation (not total GPU memory!)
+        long openCLMaxAllocation = org.beehive.gpullama3.tornadovm.OpenCLMemoryDetector.getMaxAllocationSize();
 
-        // Special handling for MoE models like GPT-OSS
-        if (isMoEModel()) {
-            // Check if we have enough memory for all expert tensors
-            long totalExpertMemory = estimateTotalExpertMemory();
+        // Calculate fixed overhead (always needed regardless of batching)
+        long fixedOverhead = calculateFixedMemoryOverhead();
 
-            if (totalExpertMemory > availableGPUMemory * 0.8) { // Use 80% threshold for safety
-                System.err.printf("[TORNADO-COPY] MoE model detected with limited GPU memory: %.2f GB required, %.2f GB available%n",
-                                totalExpertMemory / (1024.0 * 1024.0 * 1024.0),
-                                availableGPUMemory / (1024.0 * 1024.0 * 1024.0));
-                System.err.println("[TORNADO-COPY] Using single-layer processing for memory conservation");
-                return 1; // Process one layer at a time for MoE models with limited memory
-            } else {
-                System.err.printf("[TORNADO-COPY] MoE model detected with sufficient GPU memory: %.2f GB required, %.2f GB available%n",
-                                totalExpertMemory / (1024.0 * 1024.0 * 1024.0),
-                                availableGPUMemory / (1024.0 * 1024.0 * 1024.0));
-                // Continue with normal batch size calculation
-            }
+        // Calculate per-layer memory requirement
+        long perLayerMemory = estimateLayerMemoryRequirement();
+
+        System.err.printf("[TORNADO-COPY] Memory calculation: Fixed=%.2f GB, Per-layer=%.3f GB, OpenCL limit=%.2f GB%n",
+                          fixedOverhead / (1024.0 * 1024.0 * 1024.0),
+                          perLayerMemory / (1024.0 * 1024.0 * 1024.0),
+                          openCLMaxAllocation / (1024.0 * 1024.0 * 1024.0));
+
+        // Calculate how many layers can fit within OpenCL single allocation limit
+        long availableForLayers = openCLMaxAllocation - fixedOverhead;
+
+        if (availableForLayers <= 0) {
+            System.err.printf("[TORNADO-COPY] ⚠️ Fixed overhead (%.2f GB) exceeds OpenCL limit (%.2f GB)!%n",
+                              fixedOverhead / (1024.0 * 1024.0 * 1024.0),
+                              openCLMaxAllocation / (1024.0 * 1024.0 * 1024.0));
+            return 1; // Process one layer at a time as fallback
         }
 
-        // Calculate optimal batch size based on available memory (PRIORITY: Memory first!)
-        if (estimatedLayerMemory > 0 && availableGPUMemory > 0) {
-            // Calculate how many layers we can safely process at once
-            int memoryBasedBatchSize = (int) Math.max(1, (availableGPUMemory * 0.6) / estimatedLayerMemory);
-            System.err.printf("[TORNADO-COPY] Memory-based batch size calculation: %d layers (%.2f GB per layer, %.2f GB available)%n",
-                            memoryBasedBatchSize, estimatedLayerMemory / (1024.0 * 1024.0 * 1024.0),
-                            availableGPUMemory / (1024.0 * 1024.0 * 1024.0));
+        int maxLayersInBatch = (int) (availableForLayers / perLayerMemory);
 
-            // PRIORITY 1: If memory allows all layers, process all at once (override heuristics)
-            if (memoryBasedBatchSize >= totalLayers) {
-                System.err.printf("[TORNADO-COPY] ✅ GPU memory sufficient for all %d layers - processing all at once%n", totalLayers);
-                return totalLayers;
-            }
+        // Apply safety margin (use 90% of calculated max)
+        maxLayersInBatch = (int) (maxLayersInBatch * 0.9);
 
-            // PRIORITY 2: Memory is constrained - use memory-based calculation
-            System.err.printf("[TORNADO-COPY] ⚠️ GPU memory constrains batch size to %d layers%n", memoryBasedBatchSize);
-            return memoryBasedBatchSize;
+        if (maxLayersInBatch >= totalLayers) {
+            System.err.printf("[TORNADO-COPY] ✅ Can fit all %d layers within OpenCL limit%n", totalLayers);
+            return totalLayers;
+        } else {
+            System.err.printf("[TORNADO-COPY] ⚠️ OpenCL limit allows only %d of %d layers per batch%n",
+                              maxLayersInBatch, totalLayers);
+            return Math.max(1, maxLayersInBatch);
         }
+    }
 
-        // Fallback to heuristic-based calculation if memory info unavailable
-        return getHeuristicBatchSize(totalLayers);
+    /**
+     * Calculate fixed memory overhead (embeddings, output projection, KV cache, state)
+     */
+    private long calculateFixedMemoryOverhead() {
+        long overhead = 0;
+
+        // Embedding matrix (vocabulary × dimension × 4 bytes)
+        overhead += (long) config.vocabularySize() * config.dim() * 4L;
+
+        // Output projection (may be separate from embedding)
+        overhead += (long) config.vocabularySize() * config.dim() * 4L;
+
+        // KV cache for all layers
+        int kvDim = (config.dim() * config.numberOfKeyValueHeads()) / config.numberOfHeads();
+        long kvCacheSize = (long) config.contextLength() * kvDim * config.numberOfLayers() * 2L * 4L;
+        overhead += kvCacheSize;
+
+        // Runtime state tensors (x, xb, q, k, v, att, logits, etc.)
+        overhead += (long) config.dim() * 10L * 4L; // Intermediate tensors
+        overhead += (long) config.vocabularySize() * 4L; // Logits
+        overhead += (long) config.numberOfHeads() * config.contextLength() * 4L; // Attention scores
+
+        // Add 10% safety margin for other allocations
+        overhead = (long) (overhead * 1.1);
+
+        return overhead;
     }
 
     private int getHeuristicBatchSize(int totalLayers) {

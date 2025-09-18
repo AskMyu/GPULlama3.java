@@ -89,31 +89,9 @@ public abstract class ModelLoader {
             String lowerArch = architecture.toLowerCase();
             System.err.printf("[MODEL-LOADER] Architecture detected: '%s'%n", architecture);
             if (lowerArch.equals("gemma") || lowerArch.equals("gemma2") || lowerArch.equals("gemma3")) {
-                // Check filename for specific Gemma version
-                if (filename.contains("gemma-2") || filename.contains("gemma2")) {
-                    System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA 2 by filename: %s -> GEMMA_2%n", filename);
-                    return ModelType.GEMMA_2;
-                } else if (filename.contains("gemma-3") || filename.contains("gemma3")) {
-                    System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA 3 by filename: %s -> GEMMA_3%n", filename);
-                    return ModelType.GEMMA_3;
-                } else {
-                    // Fallback: check model parameters to distinguish Gemma 2 vs 3
-                    int numberOfLayers = (int) metadata.getOrDefault("gemma.block_count",
-                                           metadata.getOrDefault("llama.block_count", 0));
-                    int hiddenSize = (int) metadata.getOrDefault("gemma.embedding_length",
-                                      metadata.getOrDefault("llama.embedding_length", 0));
-
-                    // Gemma 2 2B specific parameters (26 layers, 2304 hidden)
-                    if (numberOfLayers == 26 && hiddenSize == 2304) {
-                        System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA 2 by params: layers=%d, hidden=%d -> GEMMA_2%n",
-                                          numberOfLayers, hiddenSize);
-                        return ModelType.GEMMA_2;
-                    } else {
-                        // Default to GEMMA_3 for other Gemma models (preserves existing behavior)
-                        System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA architecture: %s -> GEMMA_3%n", architecture);
-                        return ModelType.GEMMA_3;
-                    }
-                }
+                // GEMMA 2B SUPPORT REMOVED - all Gemma models now use GEMMA_3 loader
+                System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA architecture: %s -> GEMMA_3 (Gemma 2B support removed)%n", architecture);
+                return ModelType.GEMMA_3;
             } else if (lowerArch.equals("gptoss") || lowerArch.equals("gpt-oss")) {
                 return ModelType.GPT_OSS;
             } else if (lowerArch.equals("granite")) {
@@ -156,11 +134,9 @@ public abstract class ModelLoader {
         if (name != null) {
             String lowerName = name.toLowerCase();
             System.err.printf("[MODEL-LOADER] Model name: '%s'%n", name);
-            if (lowerName.contains("gemma-2") || lowerName.contains("gemma2")) {
-                System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA 2 by name: %s -> GEMMA_2%n", name);
-                return ModelType.GEMMA_2;
-            } else if (lowerName.contains("gemma-3") || lowerName.contains("gemma3")) {
-                System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA 3 by name: %s -> GEMMA_3%n", name);
+            if (lowerName.contains("gemma")) {
+                // GEMMA 2B SUPPORT REMOVED - all Gemma models now use GEMMA_3 loader
+                System.err.printf("[MODEL-LOADER] ✅ Detected GEMMA by name: %s -> GEMMA_3 (Gemma 2B support removed)%n", name);
                 return ModelType.GEMMA_3;
             } else if (lowerName.contains("gpt-oss") || lowerName.contains("gptoss")) {
                 return ModelType.GPT_OSS;
