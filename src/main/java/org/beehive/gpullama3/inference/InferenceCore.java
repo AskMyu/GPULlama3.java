@@ -2166,6 +2166,8 @@ public final class InferenceCore {
      * @return FloatTensor containing the output logits for token prediction
      */
     public static FloatArray forwardTornadoVM(Model model, State state, int token, int position, TornadoVMMasterPlan tornadoVMMasterPlan) {
+
+
         final Configuration configuration = model.configuration();
         final TornadoWeights weights = (TornadoWeights) model.weights();
 

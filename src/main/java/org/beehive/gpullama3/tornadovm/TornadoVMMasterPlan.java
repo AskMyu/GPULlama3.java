@@ -149,8 +149,8 @@ public class TornadoVMMasterPlan {
                 yield new GemmaTornadoVMLayerPlanner((GemmaState) state, model);
             }
             case GRANITE_3_3 -> {
-                System.err.println("[TORNADO-PLANNER] ✅ Using OscillationProofLayerPlanner for GRANITE_3_3 (mixed precision + σReparam)");
-                yield new OscillationProofLayerPlanner(state, model);
+                System.err.println("[TORNADO-PLANNER] ✅ Using GraniteTornadoVMLayerPlanner for GRANITE_3_3 with native GPU GQA");
+                yield new GraniteTornadoVMLayerPlanner(state, (org.beehive.gpullama3.model.granite.Granite) model);
             }
             case GPT_OSS -> {
                 System.err.println("[TORNADO-PLANNER] Using standard TornadoVMLayerPlanner for GPT_OSS");

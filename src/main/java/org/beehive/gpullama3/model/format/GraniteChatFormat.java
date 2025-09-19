@@ -20,11 +20,10 @@ public class GraniteChatFormat implements ChatFormat {
     
     private final Tokenizer tokenizer;
     
-    // Granite conversation tokens
-    private static final String SYSTEM_START = "<|system|>";
-    private static final String USER_START = "<|user|>";
-    private static final String ASSISTANT_START = "<|assistant|>";
-    private static final String END_OF_TURN = "<|end_of_text|>";
+    // Granite conversation tokens (Granite 3.3 format)
+    private static final String ROLE_START = "<|start_of_role|>";
+    private static final String ROLE_END = "<|end_of_role|>";
+    private static final String END_OF_TEXT = "<|end_of_text|>";
     
     public GraniteChatFormat(Tokenizer tokenizer) {
         this.tokenizer = tokenizer;
@@ -32,27 +31,37 @@ public class GraniteChatFormat implements ChatFormat {
     
     @Override
     public List<Integer> encodeHeader(ChatFormat.Message message) {
-        // Granite includes role information in the message itself
+        // For ASSISTANT role, we need to add the role header before generation starts
+        if (message.role().equals(ChatFormat.Role.ASSISTANT)) {
+            StringBuilder formatted = new StringBuilder();
+            formatted.append(ROLE_START).append("assistant").append(ROLE_END);
+
+            // Debug: Log the assistant header
+            System.err.printf("[GRANITE-CHAT] Assistant header: '%s'%n", formatted.toString());
+
+            List<Integer> tokens = tokenizer.encodeAsList(formatted.toString());
+            System.err.printf("[GRANITE-CHAT] Assistant header encoded to %d tokens%n", tokens.size());
+            return tokens;
+        }
+
+        // For other roles, Granite includes role information in the message itself
         return new ArrayList<>();
     }
     
     @Override
     public List<Integer> encodeMessage(ChatFormat.Message message) {
         StringBuilder formatted = new StringBuilder();
-        
-        // Format based on role
+
+        // Format based on role using Granite 3.3 format
         if (message.role().equals(ChatFormat.Role.SYSTEM)) {
-            formatted.append(SYSTEM_START);
-            formatted.append("\n").append(message.content()).append("\n");
-            formatted.append(END_OF_TURN);
+            formatted.append(ROLE_START).append("system").append(ROLE_END);
+            formatted.append(message.content()).append(END_OF_TEXT);
         } else if (message.role().equals(ChatFormat.Role.USER)) {
-            formatted.append(USER_START);
-            formatted.append("\n").append(message.content()).append("\n");
-            formatted.append(END_OF_TURN);
+            formatted.append(ROLE_START).append("user").append(ROLE_END);
+            formatted.append(message.content()).append(END_OF_TEXT);
         } else if (message.role().equals(ChatFormat.Role.ASSISTANT)) {
-            formatted.append(ASSISTANT_START);
-            formatted.append("\n").append(message.content()).append("\n");
-            formatted.append(END_OF_TURN);
+            formatted.append(ROLE_START).append("assistant").append(ROLE_END);
+            formatted.append(message.content()).append(END_OF_TEXT);
         } else if (message.role().equals(ChatFormat.Role.FIM_PREFIX)) {
             // Fill-in-the-Middle prefix
             formatted.append("<|fim_prefix|>");
@@ -64,8 +73,12 @@ public class GraniteChatFormat implements ChatFormat {
             formatted.append("<|fim_middle|>"); // Signal for middle generation
         }
         
+        // Debug: Log the formatted message
+        System.err.printf("[GRANITE-CHAT] Formatted message: '%s'%n", formatted.toString());
+
         // Encode the formatted text
         List<Integer> tokens = tokenizer.encodeAsList(formatted.toString());
+        System.err.printf("[GRANITE-CHAT] Encoded %d tokens for %s role%n", tokens.size(), message.role());
         return tokens;
     }
     
@@ -73,7 +86,7 @@ public class GraniteChatFormat implements ChatFormat {
     public int getBeginOfText() {
         // Return BOS token if available
         Map<String, Integer> specialTokens = tokenizer.getSpecialTokens();
-        return specialTokens.getOrDefault("<|begin_of_text|>", 
+        return specialTokens.getOrDefault("<|begin_of_text|>",
                specialTokens.getOrDefault("<bos>", 1));
     }
     

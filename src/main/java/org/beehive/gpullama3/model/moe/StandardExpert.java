@@ -78,10 +78,10 @@ public class StandardExpert implements Expert {
         for (int i = 0; i < hiddenBuffer.getSize(); i++) {
             float upVal = hiddenBuffer.get(i);
             float gateVal = gateBuffer.get(i);
-            
+
             // Swish/SiLU activation: x * sigmoid(x)
             float swishUp = upVal * (1.0f / (1.0f + (float) Math.exp(-upVal)));
-            
+
             // Gate activation (typically no activation for gate)
             hiddenBuffer.set(i, gateVal * swishUp);
         }

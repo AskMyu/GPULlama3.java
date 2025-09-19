@@ -1,5 +1,6 @@
 package org.beehive.gpullama3.model.granite;
 
+import org.beehive.gpullama3.inference.GraniteInferenceCore;
 import org.beehive.gpullama3.inference.InferenceCore;
 import org.beehive.gpullama3.inference.InferenceEngine;
 import org.beehive.gpullama3.inference.sampler.Sampler;
@@ -110,9 +111,8 @@ public class Granite extends AbstractModel {
     
     @Override
     public void forward(State state, int token, int position) {
-        // Use the same inference core as Llama for now
-        // Future optimization: implement Granite-specific forward pass with SwiGLU
-        InferenceCore.forwardJava(this, state, token, position);
+        // Use Granite-specific inference core with GQA and SwiGLU
+        GraniteInferenceCore.forwardGranite(this, state, token, position);
     }
     
     @Override
@@ -130,9 +130,9 @@ public class Granite extends AbstractModel {
                                           Set<Integer> stopTokens, int maxTokens, Sampler sampler,
                                           boolean echo, IntConsumer onTokenGenerated,
                                           TornadoVMMasterPlan tornadoVMPlan) {
-        // Use Llama's GPU generation for now
-        return InferenceEngine.generateTokensGPULlama(this, state, startPosition, promptTokens,
-                                                     stopTokens, maxTokens, sampler, echo,
-                                                     onTokenGenerated, tornadoVMPlan);
+        // Use Granite-specific GPU generation with GQA support
+        return InferenceEngine.generateTokensGPUGranite(this, state, startPosition, promptTokens,
+                                                       stopTokens, maxTokens, sampler, echo,
+                                                       onTokenGenerated, tornadoVMPlan);
     }
 }

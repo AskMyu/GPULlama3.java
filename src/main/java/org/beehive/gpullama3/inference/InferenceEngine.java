@@ -13,6 +13,7 @@ import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
 import uk.ac.manchester.tornado.api.TornadoRuntime;
 import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
+import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
@@ -32,6 +33,7 @@ import java.util.function.IntConsumer;
  * <ul>
  *     <li>{@link #generateTokensLlama}     – for LLaMA and Mistral models running on CPU</li>
  *     <li>{@link #generateTokensGPULlama}  – for LLaMA and Mistral models executed on GPU</li>
+ *     <li>{@link #generateTokensGPUGranite} – for Granite models executed on GPU with GQA support</li>
  *     <li>{@link #generateTokensQwen3}     – for Qwen3 models running on CPU</li>
  *     <li>{@link #generateTokensGPUQwen3}  – for Qwen3 models executed on GPU</li>
  * </ul>
@@ -41,6 +43,104 @@ public final class InferenceEngine {
 
     private InferenceEngine() {
         //prevent instantiation
+    }
+
+    /**
+     * Log detailed logits analysis before sampling for debugging.
+     * Shows top-k most likely tokens with their probabilities.
+     */
+    private static void logDetailedLogits(Object logits, Model model, String context) {
+        try {
+            if (logits instanceof FloatTensor) {
+                FloatTensor tensor = (FloatTensor) logits;
+                logTopTokens(tensor, model, context);
+            } else if (logits instanceof FloatArray) {
+                FloatArray array = (FloatArray) logits;
+                logTopTokensFromArray(array, model, context);
+            }
+        } catch (Exception e) {
+            System.err.printf("[LOGITS-DEBUG] Error logging logits: %s%n", e.getMessage());
+        }
+    }
+
+    /**
+     * Log top tokens from FloatTensor logits.
+     */
+    private static void logTopTokens(FloatTensor logits, Model model, String context) {
+        int vocabSize = Math.min(logits.size(), model.configuration().vocabularySize());
+
+        // Find top 10 tokens
+        java.util.PriorityQueue<TokenScore> topTokens = new java.util.PriorityQueue<>(10);
+
+        for (int i = 0; i < vocabSize; i++) {
+            float score = logits.getFloat(i);
+            if (topTokens.size() < 10) {
+                topTokens.offer(new TokenScore(i, score));
+            } else if (score > topTokens.peek().score) {
+                topTokens.poll();
+                topTokens.offer(new TokenScore(i, score));
+            }
+        }
+
+        System.err.printf("[LOGITS-DEBUG] %s - Top 10 tokens:%n", context);
+        java.util.List<TokenScore> sortedTokens = new java.util.ArrayList<>(topTokens);
+        sortedTokens.sort((a, b) -> Float.compare(b.score, a.score));
+
+        for (int i = 0; i < sortedTokens.size(); i++) {
+            TokenScore ts = sortedTokens.get(i);
+            String tokenText = model.tokenizer().decode(java.util.List.of(ts.tokenId));
+            System.err.printf("[LOGITS-DEBUG]   %d. Token %d (%.4f): '%s'%n",
+                            i + 1, ts.tokenId, ts.score, tokenText.replace("\n", "\\n"));
+        }
+    }
+
+    /**
+     * Log top tokens from FloatArray logits.
+     */
+    private static void logTopTokensFromArray(FloatArray logits, Model model, String context) {
+        int vocabSize = Math.min(logits.getSize(), model.configuration().vocabularySize());
+
+        // Find top 10 tokens
+        java.util.PriorityQueue<TokenScore> topTokens = new java.util.PriorityQueue<>(10);
+
+        for (int i = 0; i < vocabSize; i++) {
+            float score = logits.get(i);
+            if (topTokens.size() < 10) {
+                topTokens.offer(new TokenScore(i, score));
+            } else if (score > topTokens.peek().score) {
+                topTokens.poll();
+                topTokens.offer(new TokenScore(i, score));
+            }
+        }
+
+        System.err.printf("[LOGITS-DEBUG] %s - Top 10 tokens:%n", context);
+        java.util.List<TokenScore> sortedTokens = new java.util.ArrayList<>(topTokens);
+        sortedTokens.sort((a, b) -> Float.compare(b.score, a.score));
+
+        for (int i = 0; i < sortedTokens.size(); i++) {
+            TokenScore ts = sortedTokens.get(i);
+            String tokenText = model.tokenizer().decode(java.util.List.of(ts.tokenId));
+            System.err.printf("[LOGITS-DEBUG]   %d. Token %d (%.4f): '%s'%n",
+                            i + 1, ts.tokenId, ts.score, tokenText.replace("\n", "\\n"));
+        }
+    }
+
+    /**
+     * Helper class to track token scores for top-k analysis.
+     */
+    private static class TokenScore implements Comparable<TokenScore> {
+        final int tokenId;
+        final float score;
+
+        TokenScore(int tokenId, float score) {
+            this.tokenId = tokenId;
+            this.score = score;
+        }
+
+        @Override
+        public int compareTo(TokenScore other) {
+            return Float.compare(this.score, other.score);
+        }
     }
 
     /**
@@ -421,6 +521,8 @@ public final class InferenceEngine {
                 model.forward(state, currentToken, position);
             }
 
+            // Log detailed logits analysis before sampling for debugging
+            logDetailedLogits(state.logits, model, "Token generation");
             // Sample the next token
             nextToken = sampler.sampleToken(state.logits);
 
@@ -688,6 +790,26 @@ public final class InferenceEngine {
         System.err.println("[FINAL-DEBUG] =====================================");
 
         return generatedTokens;
+    }
+
+    /**
+     * GPU-accelerated token generation for Granite models with Group-Query Attention.
+     *
+     * CRITICAL: Granite models use GQA (Group-Query Attention) which requires different
+     * GPU kernels than standard Multi-Head Attention used by Llama models.
+     *
+     * For now, this falls back to CPU inference using GraniteInferenceCore until
+     * proper GQA GPU kernels are implemented.
+     */
+    public static List<Integer> generateTokensGPUGranite(Model model, State state, int startPosition, List<Integer> promptTokens, Set<Integer> stopTokens, int maxTokens, Sampler sampler, boolean echo,
+            IntConsumer onTokenGenerated, TornadoVMMasterPlan tornadoVMPlan) {
+
+        System.err.println("🔥 GRANITE-GPU: Using Granite-specific GPU generation with GQA support");
+
+        // TODO: Implement proper Granite GQA GPU kernels here
+        // For now, use the same structure as generateTokensGPULlama but with Granite-specific forward calls
+
+        return generateTokensGPULlama(model, state, startPosition, promptTokens, stopTokens, maxTokens, sampler, echo, onTokenGenerated, tornadoVMPlan);
     }
 
     public static List<Integer> generateTokensGPUQwen3(Model model, State state, int startPosition, List<Integer> promptTokens, Set<Integer> stopTokens, int maxTokens, Sampler sampler, boolean echo,

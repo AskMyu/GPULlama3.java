@@ -79,6 +79,9 @@ public class GraniteModelLoader extends ModelLoader {
             ropeTheta
         );
 
+        // Validate configuration matches Granite architecture
+        validateGraniteConfiguration(config, metadata);
+
         // Load vocabulary and create tokenizer
         // Granite uses a similar vocabulary structure to other models
         String[] tokens = (String[]) metadata.get("tokenizer.ggml.tokens");
@@ -106,5 +109,55 @@ public class GraniteModelLoader extends ModelLoader {
 
         // Return the loaded Granite model
         return new Granite(config, tokenizer, weights, chatFormat);
+    }
+
+    /**
+     * Validates that the loaded model configuration matches expected Granite architecture.
+     */
+    private void validateGraniteConfiguration(GraniteConfiguration config, Map<String, Object> metadata) {
+        int nHeads = config.numberOfHeads();
+        int nKVHeads = config.numberOfKeyValueHeads();
+        int dim = config.dim();
+        int hiddenDim = config.hiddenDim();
+
+        // Validate GQA configuration
+        if (nKVHeads >= nHeads) {
+            throw new IllegalStateException(
+                String.format("Invalid Granite model: KV heads (%d) >= Q heads (%d). " +
+                             "This is not a GQA model.", nKVHeads, nHeads));
+        }
+
+        if (nKVHeads == 0) {
+            throw new IllegalStateException("Invalid Granite model: KV heads cannot be 0");
+        }
+
+        if (nHeads % nKVHeads != 0) {
+            throw new IllegalStateException(
+                String.format("Invalid Granite GQA configuration: Q heads (%d) must be divisible by KV heads (%d)",
+                             nHeads, nKVHeads));
+        }
+
+        // Validate SwiGLU dimensions
+        // SwiGLU typically uses 8/3 * dim or similar expansion
+        // Granite 2B uses 5504 hidden dim for 2048 base dim (2.69x)
+        int expectedHiddenDim = (int)(dim * 2.67);
+        int tolerance = (int)(dim * 0.5); // Allow some variation
+
+        if (Math.abs(hiddenDim - expectedHiddenDim) > tolerance) {
+            System.err.printf("[GRANITE-LOADER] Warning: Hidden dim %d differs from expected SwiGLU dimension ~%d\n",
+                            hiddenDim, expectedHiddenDim);
+        }
+
+        // Log successful validation
+        System.err.printf("[GRANITE-LOADER] ✅ Loaded Granite model with GQA (%d Q heads, %d KV heads, ratio %d:1) and SwiGLU\n",
+                        nHeads, nKVHeads, nHeads / nKVHeads);
+        System.err.printf("[GRANITE-LOADER] Model dimensions: dim=%d, hiddenDim=%d, kvDim=%d\n",
+                        dim, hiddenDim, config.kvDim());
+
+        // Check for model name in metadata
+        String modelName = (String) metadata.get("general.name");
+        if (modelName != null && !modelName.toLowerCase().contains("granite")) {
+            System.err.printf("[GRANITE-LOADER] Warning: Model name '%s' does not contain 'granite'\n", modelName);
+        }
     }
 }

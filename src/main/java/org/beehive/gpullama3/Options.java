@@ -79,6 +79,25 @@ public record Options(Path modelPath, String prompt, String systemPrompt, String
         return new Options(modelPath, prompt, systemPrompt, suffix, interactive, temperature, topp, topK, seed, maxTokens, stream, echo, useTornadoVM, null);
     }
 
+    /**
+     * Get conservative sampling parameters optimized for Granite models.
+     * These parameters prioritize more deterministic, focused responses.
+     */
+    public static Options withConservativeSampling(Options original) {
+        // Conservative parameters for better response quality
+        float conservativeTemperature = 0.2f;  // Much lower for more focused responses
+        float conservativeTopp = 0.7f;         // More selective nucleus sampling
+        int conservativeTopK = 20;             // Smaller candidate pool
+
+        System.err.printf("[CONSERVATIVE-SAMPLING] Applied to Granite: temp=%.2f, top-p=%.2f, top-k=%d%n",
+                        conservativeTemperature, conservativeTopp, conservativeTopK);
+
+        return new Options(original.modelPath, original.prompt, original.systemPrompt, original.suffix,
+                         original.interactive, conservativeTemperature, conservativeTopp, conservativeTopK,
+                         original.seed, original.maxTokens, original.stream, original.echo,
+                         original.useTornadovm, original.imagePath);
+    }
+
     public static Options parseOptions(String[] args) {
         String prompt = "Tell me a story with Java"; // Hardcoded for testing
         String systemPrompt = null;

@@ -244,6 +244,18 @@ public class LlamaApp {
     }
 
     private static Sampler createSampler(Model model, Options options) {
+        // Apply conservative sampling for Granite models to improve response quality
+        if (model.getModelType() == ModelType.GRANITE_3_3) {
+            System.err.println("[GRANITE-SAMPLER] Detected Granite model - applying conservative sampling parameters");
+            Options conservativeOptions = Options.withConservativeSampling(options);
+            return selectSampler(model.configuration().vocabularySize(),
+                               conservativeOptions.temperature(),
+                               conservativeOptions.topp(),
+                               conservativeOptions.topK(),
+                               conservativeOptions.seed(),
+                               model.getModelType());
+        }
+
         return selectSampler(model.configuration().vocabularySize(), options.temperature(), options.topp(), options.topK(), options.seed(), model.getModelType());
     }
 
