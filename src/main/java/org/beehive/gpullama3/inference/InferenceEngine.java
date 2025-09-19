@@ -532,14 +532,16 @@ public final class InferenceEngine {
         // Pre-validate the max tokens to avoid checking in the loop
         // CRITICAL FIX: For VLM models, maxTokens represents maximum NEW tokens to generate
         // We need to convert this to absolute position by adding startPosition + prompt length
+        // Use a separate variable to avoid corrupting non-VLM token counting
+        int effectiveMaxTokens = maxTokens;
         if (isVLM && maxTokens > 0) {
             int originalMaxTokens = maxTokens;
-            maxTokens = startPosition + promptTokens.size() + maxTokens;
+            effectiveMaxTokens = startPosition + promptTokens.size() + maxTokens;
             if (isVLM) {
-                System.err.println("[GPU-DEBUG] FIXED: Converted maxTokens from " + originalMaxTokens + " to " + maxTokens + " (startPos + promptLen + newTokens = " + startPosition + " + " + promptTokens.size() + " + " + originalMaxTokens + ")");
+                System.err.println("[GPU-DEBUG] FIXED: VLM using effectiveMaxTokens " + effectiveMaxTokens + " (startPos + promptLen + newTokens = " + startPosition + " + " + promptTokens.size() + " + " + originalMaxTokens + ")");
             }
         }
-        int actualMaxTokens = Math.min(maxTokens > 0 ? maxTokens : model.configuration().contextLength(), model.configuration().contextLength());
+        int actualMaxTokens = Math.min(effectiveMaxTokens > 0 ? effectiveMaxTokens : model.configuration().contextLength(), model.configuration().contextLength());
 
         // Preallocate with expected capacity to avoid resizing
         int remainingTokens = actualMaxTokens - promptTokens.size();
@@ -586,21 +588,29 @@ public final class InferenceEngine {
                 }
 
                 // Sample next token - use GPU sampling if available
-                nextToken = sampler.sampleToken(logits);
-                
-                // Debug token generation issue
+                // DEBUG: Check logits before sampling
                 int vocabSize = model.configuration().vocabularySize();
+                if (logits instanceof uk.ac.manchester.tornado.api.types.arrays.FloatArray) {
+                    uk.ac.manchester.tornado.api.types.arrays.FloatArray fa = (uk.ac.manchester.tornado.api.types.arrays.FloatArray) logits;
+                    System.err.printf("[LOGITS-DEBUG] Logits array size: %d, vocab size: %d%n", fa.getSize(), vocabSize);
+                    if (fa.getSize() != vocabSize) {
+                        System.err.printf("[LOGITS-ERROR] SIZE MISMATCH! Logits size %d != vocab size %d%n", fa.getSize(), vocabSize);
+                    }
+                    // Show first 5 and last 5 logits
+                    System.err.printf("[LOGITS-DEBUG] First 5 logits: [%f, %f, %f, %f, %f]%n",
+                        fa.get(0), fa.get(1), fa.get(2), fa.get(3), fa.get(4));
+                    if (fa.getSize() >= 5) {
+                        System.err.printf("[LOGITS-DEBUG] Last 5 logits: [%f, %f, %f, %f, %f]%n",
+                            fa.get(fa.getSize()-5), fa.get(fa.getSize()-4), fa.get(fa.getSize()-3),
+                            fa.get(fa.getSize()-2), fa.get(fa.getSize()-1));
+                    }
+                }
+
+                nextToken = sampler.sampleToken(logits);
+
+                // Debug token generation issue
                 if (nextToken >= vocabSize - 100) {
                     System.err.printf("[TOKEN-DEBUG] Sampled suspicious token: %d (vocab size: %d)%n", nextToken, vocabSize);
-                    // Check logits at suspicious range
-                    if (logits instanceof uk.ac.manchester.tornado.api.types.arrays.FloatArray) {
-                        uk.ac.manchester.tornado.api.types.arrays.FloatArray fa = (uk.ac.manchester.tornado.api.types.arrays.FloatArray) logits;
-                        System.err.printf("[TOKEN-DEBUG] Logits size: %d%n", fa.getSize());
-                        if (fa.getSize() >= vocabSize - 5) {
-                            System.err.printf("[TOKEN-DEBUG] Last 5 logits: [%f, %f, %f, %f, %f]%n",
-                                fa.get(vocabSize-5), fa.get(vocabSize-4), fa.get(vocabSize-3), fa.get(vocabSize-2), fa.get(vocabSize-1));
-                        }
-                    }
                 }
 
                 // Add token consumer support
@@ -614,6 +624,7 @@ public final class InferenceEngine {
                 }
 
                 // Store token
+                System.err.printf("[TOKEN-STORE] Adding token %d to generatedTokens (list size now: %d)%n", nextToken, generatedTokens.size() + 1);
                 generatedTokens.add(nextToken);
                 
                 // 🔍 TOKEN CORRUPTION DEBUGGING - Track exact token values

@@ -253,7 +253,26 @@ public interface Model {
 
         String responseText = "";
         if (!options.stream()) {
-             responseText = tokenizer().decode(responseTokens);
+            // DEBUG: Check what tokens we're trying to decode
+            System.err.printf("[FINAL-DECODE] Decoding %d response tokens: %s%n",
+                responseTokens.size(), responseTokens.toString());
+
+            // DEBUG: Decode each token individually to find corruption
+            System.err.println("[TOKEN-DECODE] Individual token decodes:");
+            for (int i = 0; i < responseTokens.size(); i++) {
+                int token = responseTokens.get(i);
+                String decoded = tokenizer().decode(List.of(token));
+                System.err.printf("[TOKEN-DECODE] Token %d -> '%s' (length=%d)%n", token, decoded, decoded.length());
+            }
+
+            // WORKAROUND: Use individual token decode to avoid batch decode bug
+            StringBuilder sb = new StringBuilder();
+            for (int token : responseTokens) {
+                sb.append(tokenizer().decode(List.of(token)));
+            }
+            responseText = sb.toString();
+            System.err.printf("[WORKAROUND] Using individual token decode: '%s'%n", responseText);
+            System.err.printf("[FINAL-DECODE] Complete decode result: '%s' (length=%d)%n", responseText, responseText.length());
             // Add the forced <think>\n prefix for non-streaming output
             if (shouldIncludeReasoning()) {
                 responseText = "<think>\n" + responseText;

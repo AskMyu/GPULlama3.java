@@ -62,9 +62,8 @@ public class LlamaState extends State {
         
         // Phase 2: Use SmartCacheArray for unlimited cache size support
         // Determine if this is a VLM model (check for vision-related configuration)
-        boolean isVLM = config.toString().toLowerCase().contains("llava") || 
-                       config.toString().toLowerCase().contains("vlm") ||
-                       System.getProperty("llava.token.reduction.enable", "false").equals("true");
+        // Only mark as VLM if this is actually a VLMState instance
+        boolean isVLM = (this instanceof VLMState);
         
         // Create cache topology for optimization
         CacheTopology topology = isVLM ? 

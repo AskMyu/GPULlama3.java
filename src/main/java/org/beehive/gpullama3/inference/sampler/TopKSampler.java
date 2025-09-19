@@ -100,9 +100,15 @@ public final class TopKSampler implements Sampler {
         float randomValue = rng.nextFloat();
         float cumulative = 0.0f;
 
+        // DEBUG: Log top-K sampling details
+        System.err.printf("[TOPK-DEBUG] Sampling from top-%d tokens, random=%.6f%n", topK, randomValue);
+        System.err.printf("[TOPK-DEBUG] Top 5 tokens: [%d(%.4f), %d(%.4f), %d(%.4f), %d(%.4f), %d(%.4f)]%n",
+            indices[0], probs[0], indices[1], probs[1], indices[2], probs[2], indices[3], probs[3], indices[4], probs[4]);
+
         for (int i = 0; i < topK; i++) {
             cumulative += probs[i];
             if (randomValue <= cumulative) {
+                System.err.printf("[TOPK-DEBUG] Selected token: %d (index %d, prob=%.4f, cumulative=%.4f)%n", indices[i], i, probs[i], cumulative);
                 return indices[i];
             }
         }
