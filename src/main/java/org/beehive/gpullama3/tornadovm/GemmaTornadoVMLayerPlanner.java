@@ -4,6 +4,7 @@ import org.beehive.gpullama3.auxiliary.Tuple2;
 import org.beehive.gpullama3.inference.state.GemmaState;
 import org.beehive.gpullama3.inference.weights.tornado.TornadoWeights;
 import org.beehive.gpullama3.model.Model;
+import org.beehive.gpullama3.model.Configuration;
 import org.beehive.gpullama3.model.gemma.GemmaConfiguration;
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
@@ -93,12 +94,37 @@ public class GemmaTornadoVMLayerPlanner extends TornadoVMLayerPlanner<GemmaState
                             state.positionHolder, state.wrapQ, state.wrapK, config.kvDim(),
                             config.headSize())
                     .task("copyToCaches", TransformerComputeKernelsLayered::copyToCache,
-                            getFloatArrayFromCache(state.wrapKeyCache), state.wrapK, getFloatArrayFromCache(state.wrapValueCache), state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength())
-                    .task("parallel-attention", TransformerComputeKernelsLayered::processHeadsFlashAttentionMixedPrecision, context,
+                            getFloatArrayFromCache(state.wrapKeyCache), state.wrapK, getFloatArrayFromCache(state.wrapValueCache), state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength());
+
+            // Attention implementation - differentiate between Gemma and non-Gemma models
+            if (config instanceof GemmaConfiguration) {
+                GemmaConfiguration gemmaConfig = (GemmaConfiguration) config;
+                if (gemmaConfig.isGlobalAttentionLayer(layerIndex)) {
+                    // Global attention with full context and enhanced RoPE
+                    System.err.printf("[GEMMA-PATTERN] Layer %d: GLOBAL (full context) attention, RoPE=1000000, Window=%d%n",
+                                     layerIndex, config.contextLength());
+                    unifiedLayer = unifiedLayer.task("global-attention", TransformerComputeKernelsLayered::processHeadsFlashAttentionGlobalGemma, context,
                             state.wrapQ, getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), state.wrapXb,
                             config.numberOfHeads(), config.headSize(), config.kvDim(), config.kvMul(),
-                            state.positionHolder, layerIndex, config.contextLength())
-                    .task("matmul1", TransformerComputeKernelsLayered::matrixVectorGenericWithResidual, context,
+                            state.positionHolder, layerIndex, config.contextLength(), 1000000.0f, config.contextLength());
+                } else {
+                    // Local attention with 1024-token sliding window
+                    System.err.printf("[GEMMA-PATTERN] Layer %d: LOCAL (1024-token window) attention, RoPE=%.0f, Window=1024%n",
+                                     layerIndex, config.ropeTheta());
+                    unifiedLayer = unifiedLayer.task("local-attention", TransformerComputeKernelsLayered::processHeadsFlashAttentionLocalGemma, context,
+                            state.wrapQ, getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), state.wrapXb,
+                            config.numberOfHeads(), config.headSize(), config.kvDim(), config.kvMul(),
+                            state.positionHolder, layerIndex, config.contextLength(), config.ropeTheta(), 1024);
+                }
+            } else {
+                // Non-Gemma models use standard mixed precision attention
+                unifiedLayer = unifiedLayer.task("parallel-attention", TransformerComputeKernelsLayered::processHeadsFlashAttentionMixedPrecision, context,
+                        state.wrapQ, getFloatArrayFromCache(state.wrapKeyCache), getFloatArrayFromCache(state.wrapValueCache), state.wrapXb,
+                        config.numberOfHeads(), config.headSize(), config.kvDim(), config.kvMul(),
+                        state.positionHolder, layerIndex, config.contextLength());
+            }
+
+            unifiedLayer = unifiedLayer.task("matmul1", TransformerComputeKernelsLayered::matrixVectorGenericWithResidual, context,
                             state.wrapXb, state.wrapX, weights.woLayered[layerIndex], config.dim(), config.dim(), GEMMA_LOCAL_WORK_GROUP_SIZE)
                     .task("reductionsOneBlockFFN", TransformerComputeKernelsLayered::reductionOneBlockWithLayer, context, state.tempFFN,
                             state.wrapX, config.dim(), config.rmsNormEps(), state.localSize)
@@ -254,7 +280,17 @@ public class GemmaTornadoVMLayerPlanner extends TornadoVMLayerPlanner<GemmaState
             tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".mapContext", rmsNormWorker);
             tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".reductionsOneBlockFFN", rmsNormWorker);
             tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".mapContextFFN", rmsNormWorker);
-            tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".parallel-attention", parallelAttentionWorker);
+            // Attention task mapping: differentiate between Gemma and non-Gemma models
+            if (config instanceof GemmaConfiguration) {
+                GemmaConfiguration gemmaConfig = (GemmaConfiguration) config;
+                if (gemmaConfig.isGlobalAttentionLayer(i)) {
+                    tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".global-attention", parallelAttentionWorker);
+                } else {
+                    tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".local-attention", parallelAttentionWorker);
+                }
+            } else {
+                tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".parallel-attention", parallelAttentionWorker);
+            }
             tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".copyToCaches", copyToCachesWorker);
         }
 
@@ -265,6 +301,7 @@ public class GemmaTornadoVMLayerPlanner extends TornadoVMLayerPlanner<GemmaState
 
         return tornadoForwardScheduler;
     }
+
 
     /**
      * Helper method to extract FloatArray from cache objects (SmartCacheArray or FloatArray).
