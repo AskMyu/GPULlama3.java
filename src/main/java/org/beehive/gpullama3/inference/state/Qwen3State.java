@@ -29,8 +29,7 @@ public final class Qwen3State extends State {
     public Qwen3State(Configuration config, int batchsize) {
         super(config, batchsize);
         // Initialize Qwen3-specific fields
-        Qwen3Configuration qwen3config = (Qwen3Configuration) config;
-        int nEmbdHead = qwen3config.numberOfHeads();
+        int nEmbdHead = config.numberOfHeads();
         this.tempQcur = new FloatArray(nEmbdHead);
         this.tempKcur = new FloatArray(nEmbdHead);
     }
@@ -39,7 +38,7 @@ public final class Qwen3State extends State {
     protected StateFields createStateFields(Configuration configuration) {
         StateFields fields = new StateFields();
 
-        Qwen3Configuration config = (Qwen3Configuration) configuration;
+        Configuration config = configuration;
 
         // Qwen3-specific sizes
         int nHeadKv = config.numberOfKeyValueHeads();

@@ -37,6 +37,11 @@ public record LlavaConfiguration(
     }
 
     @Override
+    public int numberOfHeadsValue() {
+        throw new UnsupportedOperationException("Not supported for llava.");
+    }
+
+    @Override
     public int contextLengthModel() {
         return contextLength;
     }

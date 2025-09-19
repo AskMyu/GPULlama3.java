@@ -12,6 +12,7 @@ import org.beehive.gpullama3.model.loader.OlmoeModelLoader;
 import org.beehive.gpullama3.model.loader.Phi4ModelLoader;
 import org.beehive.gpullama3.model.loader.Qwen3ModelLoader;
 import org.beehive.gpullama3.model.loader.LlavaModelLoader;
+import org.beehive.gpullama3.model.loader.DeepSeekR1ModelLoader;
 
 import java.nio.channels.FileChannel;
 
@@ -59,7 +60,7 @@ public enum ModelType {
     DEEPSEEK_R1_DISTILL_QWEN {
         @Override
         public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
-            return new Qwen2ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+            return new DeepSeekR1ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
         }
     },
 
@@ -99,6 +100,13 @@ public enum ModelType {
         }
     },
 
+    DEEPSEEK_R1_DISTILL_QWEN_14B {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new Qwen2ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
     OLMOE_1B_7B {
         @Override
         public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
@@ -112,6 +120,7 @@ public enum ModelType {
             return new Phi4ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
         }
     },
+
 
     QWEN3_30B_A3B {
         @Override
@@ -145,6 +154,13 @@ public enum ModelType {
         }
     },
 
+    DEEPSEEK_R1_FULL {
+        @Override
+        public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
+            return new DeepSeekR1ModelLoader(fileChannel, gguf, contextLength, loadWeights, useTornadovm).loadModel();
+        }
+    },
+
     UNKNOWN {
         @Override
         public Model loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights, boolean useTornadovm) {
@@ -162,15 +178,15 @@ public enum ModelType {
     }
 
     public boolean isDeepSeekR1() {
-        return this == DEEPSEEK_R1_DISTILL_QWEN || this == DEEPSEEK_R1_DISTILL_QWEN_1_5B;
+        return this == DEEPSEEK_R1_DISTILL_QWEN || this == DEEPSEEK_R1_DISTILL_QWEN_1_5B || this == DEEPSEEK_R1_DISTILL_QWEN_14B || this == DEEPSEEK_R1_FULL;
     }
-    
+
     public boolean isReasoningModel() {
-        return this == DEEPSEEK_R1_DISTILL_QWEN || this == DEEPSEEK_R1_DISTILL_QWEN_1_5B || this == PHI_4_MINI_REASONING;
+        return this == DEEPSEEK_R1_DISTILL_QWEN || this == DEEPSEEK_R1_DISTILL_QWEN_1_5B || this == DEEPSEEK_R1_DISTILL_QWEN_14B || this == DEEPSEEK_R1_FULL || this == PHI_4_MINI_REASONING;
     }
-    
+
     public boolean isMoEModel() {
-        return this == GPT_OSS || this == OLMOE_1B_7B || this == QWEN3_30B_A3B;
+        return this == GPT_OSS || this == OLMOE_1B_7B || this == QWEN3_30B_A3B || this == DEEPSEEK_R1_FULL;
     }
     
     public boolean isVisionLanguageModel() {

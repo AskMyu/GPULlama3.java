@@ -20,6 +20,11 @@ public record Phi3Configuration(int dim,
     }
 
     @Override
+    public int numberOfHeadsValue() {
+        throw new UnsupportedOperationException("Not supported for phi3.");
+    }
+
+    @Override
     public int headSize() {
         // Calculate head size from dim and numberOfHeads
         return dim / numberOfHeads;

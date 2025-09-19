@@ -66,21 +66,31 @@ public class Qwen3ChatFormat implements ChatFormat {
                 default -> null;
             };
             if (sToken != null) {
-                Integer token = tokenizer.getSpecialTokens().get("<｜User｜>");
-                if (token == null) {
-                    throw new IllegalStateException(String.format("Unknown token '%s'", sToken));
+                Integer token = tokenizer.getSpecialTokens().get(sToken);
+                if (token != null) {
+                    tokens.add(token);
+                } else {
+                    // Fallback: encode as regular text if special token not found
+                    tokens.addAll(this.tokenizer.encodeAsList(sToken));
                 }
-                tokens.add(token);
             }
         } else if (Role.FIM_PREFIX.equals(message.role())) {
             // fill-in-the-middle, token fim_prefix.
-            tokens.add(fimPrefix);
+            if (fimPrefix != -1) {
+                tokens.add(fimPrefix);
+            }
         } else if (Role.FIM_SUFFIX.equals(message.role())) {
-            tokens.add(fimSuffix);
+            if (fimSuffix != -1) {
+                tokens.add(fimSuffix);
+            }
         } else if (Role.FIM_MIDDLE.equals(message.role())) {
-            tokens.add(fimMiddle);
+            if (fimMiddle != -1) {
+                tokens.add(fimMiddle);
+            }
         } else {
-            tokens.add(imStart);
+            if (imStart != -1) {
+                tokens.add(imStart);
+            }
             tokens.addAll(this.tokenizer.encodeAsList(message.role().name()));
             tokens.addAll(this.tokenizer.encodeAsList("\n"));
         }
@@ -100,17 +110,65 @@ public class Qwen3ChatFormat implements ChatFormat {
 
     @Override
     public int getBeginOfText() {
+        // For DeepSeek-R1, if beginOfText is not found, return a safe default
+        if (beginOfText == -1) {
+            // Try to find a suitable BOS token
+            Map<String, Integer> specialTokens = tokenizer.getSpecialTokens();
+            int bosToken = specialTokens.getOrDefault("<|im_start|>", -1);
+            if (bosToken != -1) {
+                return bosToken;
+            }
+
+            // Fallback to endOfText if available
+            if (endOfText != -1) {
+                return endOfText;
+            }
+
+            // Last resort: return 1 (safer than 0 which might be EOS)
+            System.err.println("[QWEN3-CHAT-FORMAT] Warning: No BOS token found, using token 1");
+            return 1;
+        }
         return beginOfText;
     }
 
     @Override
     public Set<Integer> getStopTokens() {
-        if (imEnd == -1 && endOfText == -1) {
-            throw new IllegalStateException("No stop token is defined.");
+        // For DeepSeek-R1, be more flexible with stop tokens
+        Set<Integer> stopTokens = new java.util.HashSet<>();
+
+        if (imEnd != -1) {
+            stopTokens.add(imEnd);
         }
-        if (imEnd == -1) {
-            return Set.of(endOfText);
+        if (endOfText != -1) {
+            stopTokens.add(endOfText);
         }
-        return Set.of(imEnd, endOfText, endOfTextFim);
+        if (endOfTextFim != -1) {
+            stopTokens.add(endOfTextFim);
+        }
+
+        // If no standard stop tokens found, try to find common alternatives
+        if (stopTokens.isEmpty()) {
+            Map<String, Integer> specialTokens = tokenizer.getSpecialTokens();
+
+            // Try common end-of-sequence tokens
+            int eosToken = specialTokens.getOrDefault("<|endoftext|>", -1);
+            if (eosToken != -1) {
+                stopTokens.add(eosToken);
+            }
+
+            // Try alternative end tokens
+            int altEnd = specialTokens.getOrDefault("<｜end▁of▁sentence｜>", -1);
+            if (altEnd != -1) {
+                stopTokens.add(altEnd);
+            }
+
+            // Last resort: use a reasonable default (EOS token ID is often 2)
+            if (stopTokens.isEmpty()) {
+                System.err.println("[QWEN3-CHAT-FORMAT] Warning: No stop tokens found, using default EOS token 2");
+                stopTokens.add(2);
+            }
+        }
+
+        return stopTokens;
     }
 }

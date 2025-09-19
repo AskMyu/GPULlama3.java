@@ -30,6 +30,11 @@ public record GraniteConfiguration(
     }
 
     @Override
+    public int numberOfHeadsValue() {
+        throw new UnsupportedOperationException("Not supported for granite.");
+    }
+
+    @Override
     public int contextLengthModel() {
         // Return the configured context length
         return contextLength;

@@ -142,10 +142,13 @@ public abstract class ModelLoader {
                 return ModelType.GPT_OSS;
             } else if (lowerName.contains("granite-3") || lowerName.contains("granite3") || lowerName.contains("granite")) {
                 return ModelType.GRANITE_3_3;
-            } else if (lowerName.contains("deepseek-r1-distill-qwen-1.5b") || 
+            } else if (lowerName.contains("deepseek-r1-distill-qwen-1.5b") ||
                        lowerName.contains("deepseek r1 distill qwen 1.5b")) {
                 return ModelType.DEEPSEEK_R1_DISTILL_QWEN_1_5B;
-            } else if (lowerName.contains("deepseek r1 distill") || 
+            } else if (lowerName.contains("deepseek-r1-distill-qwen-14b") ||
+                       lowerName.contains("deepseek r1 distill qwen 14b")) {
+                return ModelType.DEEPSEEK_R1_DISTILL_QWEN_14B;
+            } else if (lowerName.contains("deepseek r1 distill") ||
                        lowerName.contains("deepseek-r1-distill")) {
                 return ModelType.DEEPSEEK_R1_DISTILL_QWEN;
             } else if (lowerName.contains("olmoe-1b-7b") || 

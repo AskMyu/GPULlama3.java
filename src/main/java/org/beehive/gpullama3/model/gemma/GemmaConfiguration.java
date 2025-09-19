@@ -27,6 +27,11 @@ public record GemmaConfiguration(
     }
 
     @Override
+    public int numberOfHeadsValue() {
+        throw new UnsupportedOperationException("Not supported for gemma.");
+    }
+
+    @Override
     public int contextLengthModel() {
         // Return the configured context length
         return contextLength;

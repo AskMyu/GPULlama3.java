@@ -30,6 +30,11 @@ public record OlmoeConfiguration(int dim,                      // Hidden size: 2
     }
 
     @Override
+    public int numberOfHeadsValue() {
+        throw new UnsupportedOperationException("Not supported for olmoe.");
+    }
+
+    @Override
     public int headSize() {
         return dim / numberOfHeads;
     }

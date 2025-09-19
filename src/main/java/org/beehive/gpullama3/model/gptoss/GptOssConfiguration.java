@@ -32,6 +32,11 @@ public record GptOssConfiguration(
     }
 
     @Override
+    public int numberOfHeadsValue() {
+        throw new UnsupportedOperationException("Not supported for gptoss.");
+    }
+
+    @Override
     public int contextLengthModel() {
         return contextLength;
     }

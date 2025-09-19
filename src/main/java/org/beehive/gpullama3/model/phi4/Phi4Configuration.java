@@ -23,6 +23,11 @@ public record Phi4Configuration(int dim,
     }
 
     @Override
+    public int numberOfHeadsValue() {
+        throw new UnsupportedOperationException("Not supported for phi4.");
+    }
+
+    @Override
     public int headSize() {
         // Calculate head size from dim and numberOfHeads
         return dim / numberOfHeads;

@@ -128,9 +128,13 @@ public class TornadoVMMasterPlan {
                 System.err.println("[TORNADO-PLANNER] Using Phi3TornadoVMLayerPlanner");
                 yield new Phi3TornadoVMLayerPlanner((Phi3State) state, model);
             }
-            case QWEN_2, DEEPSEEK_R1_DISTILL_QWEN, DEEPSEEK_R1_DISTILL_QWEN_1_5B -> {
-                System.err.println("[TORNADO-PLANNER] Using Qwen2TornadoVMLayerPlanner");
+            case QWEN_2, DEEPSEEK_R1_DISTILL_QWEN_1_5B, DEEPSEEK_R1_DISTILL_QWEN_14B -> {
+                System.err.println("[TORNADO-PLANNER] Using Qwen2TornadoVMLayerPlanner (including DeepSeek-R1-Distill models)");
                 yield new Qwen2TornadoVMLayerPlanner((Qwen2State) state, model);
+            }
+            case DEEPSEEK_R1_DISTILL_QWEN, DEEPSEEK_R1_FULL -> {
+                System.err.println("[TORNADO-PLANNER] Using DeepSeekR1TornadoVMLayerPlanner for DeepSeek-R1");
+                yield new DeepSeekR1TornadoVMLayerPlanner((Qwen3State) state, model);
             }
             case OLMOE_1B_7B -> {
                 System.err.println("[TORNADO-PLANNER] Using standard TornadoVMLayerPlanner for OLMOE");
