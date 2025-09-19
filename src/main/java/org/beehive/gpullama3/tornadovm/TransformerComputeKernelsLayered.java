@@ -2395,6 +2395,25 @@ public class TransformerComputeKernelsLayered {
 
         context.localBarrier();
 
+        // Apply QK-norm to query vector (normalize query before attention computation)
+        if (tid == 0) {
+            float qNorm = 0.0f;
+            for (int d = 0; d < headSize; d++) {
+                float val = q_shared[d];
+                qNorm += val * val;
+            }
+            qNorm = (float) Math.sqrt(qNorm + 1e-6f);
+
+            // Normalize query in-place
+            if (qNorm > 1e-6f) {
+                for (int d = 0; d < headSize; d++) {
+                    q_shared[d] = q_shared[d] / qNorm;
+                }
+            }
+        }
+
+        context.localBarrier();
+
         // PHASE 3: Full context attention computation (process entire sequence)
         // Process sequence in tiles - GLOBAL ATTENTION processes full context
         for (int tileC = 0; tileC <= pos; tileC += BLOCK_SIZE_C) {
@@ -2581,6 +2600,25 @@ public class TransformerComputeKernelsLayered {
             if (qNorm > 1e-6f) {
                 for (int i = 0; i < headSize; i++) {
                     q_shared[i] = q_shared[i] / qNorm;
+                }
+            }
+        }
+
+        context.localBarrier();
+
+        // Apply QK-norm to query vector (normalize query before attention computation)
+        if (tid == 0) {
+            float qNorm = 0.0f;
+            for (int d = 0; d < headSize; d++) {
+                float val = q_shared[d];
+                qNorm += val * val;
+            }
+            qNorm = (float) Math.sqrt(qNorm + 1e-6f);
+
+            // Normalize query in-place
+            if (qNorm > 1e-6f) {
+                for (int d = 0; d < headSize; d++) {
+                    q_shared[d] = q_shared[d] / qNorm;
                 }
             }
         }

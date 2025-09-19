@@ -117,7 +117,7 @@ public class GemmaModelLoader extends ModelLoader {
         String[] tokens = (String[]) metadata.get("tokenizer.ggml.tokens");
         float[] scores = (float[]) metadata.get("tokenizer.ggml.scores");
         Vocabulary vocabulary = new Vocabulary(tokens, scores);
-        Tokenizer tokenizer = new GemmaTokenizer(vocabulary);
+        Tokenizer tokenizer = new GemmaTokenizer(metadata, vocabulary);
 
         // INFO: Check token embedding size for memory planning
         long estimatedTokenEmbeddingSize = (long) vocabularySize * dim;

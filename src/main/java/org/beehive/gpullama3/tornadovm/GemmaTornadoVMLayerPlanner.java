@@ -97,6 +97,7 @@ public class GemmaTornadoVMLayerPlanner extends TornadoVMLayerPlanner<GemmaState
                             getFloatArrayFromCache(state.wrapKeyCache), state.wrapK, getFloatArrayFromCache(state.wrapValueCache), state.wrapV, state.positionHolder, config.kvDim(), layerIndex, config.contextLength());
 
             // Attention implementation - differentiate between Gemma and non-Gemma models
+            // Enable Gemma-specific kernels for proper 5:1 attention pattern and QK-norm
             if (config instanceof GemmaConfiguration) {
                 GemmaConfiguration gemmaConfig = (GemmaConfiguration) config;
                 if (gemmaConfig.isGlobalAttentionLayer(layerIndex)) {

@@ -674,6 +674,9 @@ public final class InferenceEngine {
             System.err.printf("[INFERENCE-DEBUG] About to call forwardTornadoVM: currentToken=%d, pos=%d%n", currentToken, pos);
             FloatArray logits = InferenceCore.forwardTornadoVM(model, state, currentToken, pos, tornadoVMPlan);
 
+            // CRITICAL DEBUG: Track prompt processing state
+            System.err.printf("[PROMPT-DEBUG] promptIndex=%d, promptTokens.size()=%d, pos=%d%n", promptIndex, promptTokens.size(), pos);
+
             // Process prompt tokens if still remaining
             if (promptIndex < promptTokens.size()) {
                 // Get next prompt token (using array access if available)

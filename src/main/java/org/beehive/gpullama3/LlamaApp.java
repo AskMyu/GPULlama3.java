@@ -95,6 +95,9 @@ public class LlamaApp {
                 innerSampler = new CategoricalSampler(rng, vocabularySize);
             }
 
+            // Use standard sampler without custom vocabulary filtering
+            final Sampler finalInnerSampler = innerSampler;
+
             // Create a sampler that:
             // 1. Applies temperature scaling to the logits
             // 2. Converts logits to probabilities using softmax
@@ -207,8 +210,8 @@ public class LlamaApp {
                     // If logits are neither FloatTensor nor FloatArray, throw an exception
                     throw new IllegalArgumentException("Unsupported logits type: " + (logits != null ? logits.getClass().getName() : "null"));
                 }
-                System.err.printf("[%s-SAMPLER] About to call innerSampler.sampleToken()...%n", modelTypeName);
-                int result = innerSampler.sampleToken(logits);
+                System.err.printf("[%s-SAMPLER] About to call finalInnerSampler.sampleToken()...%n", modelTypeName);
+                int result = finalInnerSampler.sampleToken(logits);
                 System.err.printf("[%s-SAMPLER] innerSampler returned token: %d%n", modelTypeName, result);
                 System.err.printf("[%s-SAMPLER] ===== SAMPLER WRAPPER RETURNING =====%n", modelTypeName);
                 return result;
@@ -339,6 +342,7 @@ public class LlamaApp {
             System.exit(1);
         }
     }
+
 
     /**
      * Entry point for running the LLaMA-based model with provided command-line arguments.
