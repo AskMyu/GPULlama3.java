@@ -2521,7 +2521,8 @@ public final class InferenceCore {
         // CPU-based RMSNorm for attention
         float[] normInput = new float[dim];
         FloatTensor attentionNorm = convertFloatArrayToTensor(olmoeWeights.rms_att_weightLayered[layer]);
-        rmsnorm(convertArrayToTensor(input), convertArrayToTensor(normInput), attentionNorm, 0, dim, config.rmsNormEps());
+        // CRITICAL FIX: rmsnorm parameters were backwards! (out, x, weight) not (x, out, weight)
+        rmsnorm(convertArrayToTensor(normInput), convertArrayToTensor(input), attentionNorm, 0, dim, config.rmsNormEps());
 
         // Copy normalized input back to TornadoVM
         for (int i = 0; i < dim; i++) {
@@ -2573,6 +2574,18 @@ public final class InferenceCore {
             projectedOutput[i] += input[i];
         }
 
+        // Debug: Check attention output after residual
+        if (layer == 0) {
+            float attnSum = 0.0f;
+            float attnMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i < Math.min(100, dim); i++) {
+                attnSum += Math.abs(projectedOutput[i]);
+                attnMax = Math.max(attnMax, Math.abs(projectedOutput[i]));
+            }
+            System.err.printf("[ATTN-OUTPUT-DEBUG] Layer 0: Attention output (post-residual) avg(first100)=%.6f, max(first100)=%.6f%n",
+                            attnSum/100, attnMax);
+        }
+
         // Copy attention result back to TornadoVM state
         for (int i = 0; i < dim; i++) {
             state.wrapX.set(i, projectedOutput[i]);
@@ -2585,14 +2598,104 @@ public final class InferenceCore {
             ffnInput[i] = state.wrapX.get(i);  // After attention + residual
         }
 
+        // Debug: Check FFN input (before normalization)
+        if (layer == 0) {
+            float ffnInputSum = 0.0f;
+            float ffnInputMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i < Math.min(100, dim); i++) {
+                ffnInputSum += Math.abs(ffnInput[i]);
+                ffnInputMax = Math.max(ffnInputMax, Math.abs(ffnInput[i]));
+            }
+            System.err.printf("[FFN-INPUT-DEBUG] Layer 0: FFN input (pre-norm) avg(first100)=%.6f, max(first100)=%.6f%n",
+                            ffnInputSum/100, ffnInputMax);
+        }
+
         float[] ffnNormalized = new float[dim];
         FloatTensor ffnNorm = convertFloatArrayToTensor(olmoeWeights.rms_ffn_weightLayered[layer]);
-        rmsnorm(convertArrayToTensor(ffnInput), convertArrayToTensor(ffnNormalized), ffnNorm, 0, dim, config.rmsNormEps());
+
+        // Debug: Check FFN RMSNorm weights
+        if (layer == 0) {
+            float normWeightSum = 0.0f;
+            float normWeightMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i < Math.min(100, ffnNorm.size()); i++) {
+                float val = ffnNorm.getFloat(i);
+                normWeightSum += Math.abs(val);
+                normWeightMax = Math.max(normWeightMax, Math.abs(val));
+            }
+            System.err.printf("[RMSNORM-WEIGHTS-DEBUG] Layer 0: FFN norm weights avg(first100)=%.6f, max(first100)=%.6f, size=%d%n",
+                            normWeightSum/100, normWeightMax, ffnNorm.size());
+        }
+
+        // CRITICAL FIX: rmsnorm parameters were backwards! (out, x, weight) not (x, out, weight)
+        rmsnorm(convertArrayToTensor(ffnNormalized), convertArrayToTensor(ffnInput), ffnNorm, 0, dim, config.rmsNormEps());
+
+        // Debug: Check FFN normalized input
+        if (layer == 0) {
+            float ffnSum = 0.0f;
+            float ffnMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i < Math.min(100, dim); i++) {
+                ffnSum += Math.abs(ffnNormalized[i]);
+                ffnMax = Math.max(ffnMax, Math.abs(ffnNormalized[i]));
+            }
+            System.err.printf("[FFN-DEBUG] Layer 0: FFN normalized input avg(first100)=%.6f, max(first100)=%.6f%n",
+                            ffnSum/100, ffnMax);
+        }
 
         // Router computation
         float[] routerLogits = new float[numberOfExperts];
-        FloatTensor routerWeights = convertFloatArrayToTensor(olmoeWeights.routerWeightsArray(layer));
-        routerWeights.matmul(convertArrayToTensor(ffnNormalized), convertArrayToTensor(routerLogits), numberOfExperts, dim);
+        uk.ac.manchester.tornado.api.types.arrays.FloatArray routerArray = olmoeWeights.routerWeightsArray(layer);
+
+        // Debug: Check router weights before computation
+        if (layer == 0 || layer == config.numberOfLayers() - 1) {
+            float routerSum = 0.0f;
+            float routerMax = Float.NEGATIVE_INFINITY;
+            int routerSize = routerArray.getSize();
+            for (int i = 0; i < Math.min(100, routerSize); i++) {
+                float val = routerArray.get(i);
+                routerSum += Math.abs(val);
+                routerMax = Math.max(routerMax, Math.abs(val));
+            }
+            System.err.printf("[ROUTER-DEBUG] Layer %d: Router array size=%d, avg(first100)=%.6f, max(first100)=%.6f%n",
+                            layer, routerSize, routerSum/100, routerMax);
+        }
+
+        FloatTensor routerWeights = convertFloatArrayToTensor(routerArray);
+
+        // Debug: Check if conversion worked
+        if (layer == 0) {
+            float tensorSum = 0.0f;
+            for (int i = 0; i < Math.min(100, routerWeights.size()); i++) {
+                tensorSum += Math.abs(routerWeights.getFloat(i));
+            }
+            System.err.printf("[ROUTER-DEBUG] Layer 0: After tensor conversion, avg(first100)=%.6f%n", tensorSum/100);
+        }
+
+        // CRITICAL FIX: Router computation should be routerWeights @ ffnNormalized
+        // Router weights shape: [num_experts, dim], input shape: [dim] -> output: [num_experts]
+        FloatTensor ffnTensor = convertArrayToTensor(ffnNormalized);
+        FloatTensor logitsTensor = convertArrayToTensor(routerLogits);
+
+        // Perform correct matrix-vector multiplication: [64, 2048] @ [2048] = [64]
+        routerWeights.matmul(ffnTensor, logitsTensor, numberOfExperts, dim);
+
+        // Copy results back to array
+        for (int i = 0; i < numberOfExperts; i++) {
+            routerLogits[i] = logitsTensor.getFloat(i);
+        }
+
+        // Debug: Check router logits after matmul
+        if (layer == 0) {
+            float logitsSum = 0.0f;
+            float logitsMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i < Math.min(10, numberOfExperts); i++) {
+                logitsSum += Math.abs(routerLogits[i]);
+                logitsMax = Math.max(logitsMax, Math.abs(routerLogits[i]));
+            }
+            System.err.printf("[MATMUL-DEBUG] Layer 0: Router logits after matmul avg(first10)=%.6f, max(first10)=%.6f%n",
+                            logitsSum/10, logitsMax);
+            System.err.printf("[MATMUL-DEBUG] Layer 0: Matrix dimensions - routerWeights: %dx%d, ffnNormalized: %d -> routerLogits: %d%n",
+                            numberOfExperts, dim, dim, numberOfExperts);
+        }
 
         // Expert selection and processing using existing MoE utilities
         int[] selectedExperts = org.beehive.gpullama3.inference.MoEUtils.selectTopKExperts(routerLogits, numActiveExperts);

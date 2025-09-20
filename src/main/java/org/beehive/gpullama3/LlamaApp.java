@@ -2,11 +2,11 @@ package org.beehive.gpullama3;
 
 import org.beehive.gpullama3.aot.AOT;
 import org.beehive.gpullama3.auxiliary.LastRunMetrics;
-import org.beehive.gpullama3.core.model.tensor.FloatTensor;
-import org.beehive.gpullama3.inference.sampler.CategoricalSampler;
 import org.beehive.gpullama3.inference.sampler.Sampler;
 import org.beehive.gpullama3.inference.sampler.ToppSampler;
 import org.beehive.gpullama3.inference.sampler.TopKSampler;
+import org.beehive.gpullama3.inference.sampler.CategoricalSampler;
+import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import org.beehive.gpullama3.model.Model;
 import org.beehive.gpullama3.model.ModelType;
 import org.beehive.gpullama3.model.loader.ModelLoader;
@@ -24,14 +24,19 @@ import java.util.List;
 import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
 
+import java.io.IOException;
+
+import static org.beehive.gpullama3.inference.sampler.Sampler.createSampler;
+import static org.beehive.gpullama3.model.loader.ModelLoader.loadModel;
+
 public class LlamaApp {
+
+    private static final boolean USE_AOT = Boolean.parseBoolean(System.getProperty("llama.AOT", "false"));
     // Configuration flags for hardware acceleration and optimizations
     public static final boolean USE_VECTOR_API = Boolean.parseBoolean(System.getProperty("llama.VectorAPI", "true"));   // Enable Java Vector API for CPU acceleration
-    public static final boolean USE_AOT = Boolean.parseBoolean(System.getProperty("llama.AOT", "false"));               // Use Ahead-of-Time compilation
     public static final boolean SHOW_PERF_INTERACTIVE = Boolean.parseBoolean(System.getProperty("llama.ShowPerfInteractive", "true")); // Show performance metrics in interactive mode
 
-    /**
-     * Creates and configures a sampler for token generation based on specified parameters.
+    /* Creates and configures a sampler for token generation based on specified parameters.
      *
      * <p>This method selects an appropriate sampling strategy for next-token prediction
      * in language model inference. It supports several sampling approaches:</p>
@@ -107,7 +112,6 @@ public class LlamaApp {
                 System.err.printf("[%s-SAMPLER] ===== SAMPLER WRAPPER CALLED =====%n", modelTypeName);
                 System.err.printf("[%s-SAMPLER] Logits type: %s%n", modelTypeName,
                     logits != null ? logits.getClass().getName() : "null");
-                
                 // Handle different logits formats to support both CPU and GPU paths
                 if (logits instanceof FloatTensor) {
                     // For CPU path using FloatTensor
@@ -220,48 +224,6 @@ public class LlamaApp {
         return sampler;
     }
 
-    /**
-     * Loads the language model based on the given options.
-     * <p>
-     * If Ahead-of-Time (AOT) mode is enabled, attempts to use a pre-loaded compiled model. Otherwise, loads the model from the specified path using the model loader.
-     * </p>
-     *
-     * @param options
-     *         the parsed CLI options containing model path and max token limit
-     * @return the loaded {@link Model} instance
-     * @throws IOException
-     *         if the model fails to load
-     * @throws IllegalStateException
-     *         if AOT loading is enabled but the preloaded model is unavailable
-     */
-    private static Model loadModel(Options options) throws IOException {
-        if (USE_AOT) {
-            Model model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
-            if (model == null) {
-                throw new IllegalStateException("Failed to load precompiled AOT model.");
-            }
-            return model;
-        }
-        System.err.printf("[LLAMAAPP-DEBUG] Loading model with useTornadovm=%b%n", options.useTornadovm());
-        return ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true, options.useTornadovm());
-    }
-
-    private static Sampler createSampler(Model model, Options options) {
-        // Apply conservative sampling for Granite models to improve response quality
-        if (model.getModelType() == ModelType.GRANITE_3_3) {
-            System.err.println("[GRANITE-SAMPLER] Detected Granite model - applying conservative sampling parameters");
-            Options conservativeOptions = Options.withConservativeSampling(options);
-            return selectSampler(model.configuration().vocabularySize(),
-                               conservativeOptions.temperature(),
-                               conservativeOptions.topp(),
-                               conservativeOptions.topK(),
-                               conservativeOptions.seed(),
-                               model.getModelType());
-        }
-
-        return selectSampler(model.configuration().vocabularySize(), options.temperature(), options.topp(), options.topK(), options.seed(), model.getModelType());
-    }
-
     private static void runSingleInstruction(Model model, Sampler sampler, Options options) {
         // Check if image is provided for multimodal inference
         if (options.imagePath() != null) {
@@ -274,7 +236,6 @@ public class LlamaApp {
             }
         }
     }
-    
     /**
      * Handle multimodal (image + text) inference.
      */
@@ -283,39 +244,31 @@ public class LlamaApp {
             // Load and process the image
             byte[] imageBytes = Files.readAllBytes(options.imagePath());
             System.err.println("Loaded image: " + options.imagePath() + " (" + imageBytes.length + " bytes)");
-            
             // Process image using native Java implementation with CLIP parameters
             NativeImageProcessor processor = new NativeImageProcessor();
             ImageData imageData = processor.preprocessImage(imageBytes, 336, true); // CLIP ViT-Large uses 336x336
             System.err.println("Processed image: " + imageData);
-            
             // Create multimodal input with text prompt and image
             String textPrompt = options.prompt();
-            
             // Tokenize the text prompt using the model's tokenizer
             List<Integer> tokenList = model.tokenizer().encodeAsList(textPrompt);
             int[] textTokens = tokenList.stream().mapToInt(Integer::intValue).toArray();
             System.err.println("Tokenized text: " + textTokens.length + " tokens");
-            
+
             MultimodalInput multimodalInput = MultimodalInput.textAndImage(textPrompt, imageData, textTokens);
             System.err.println("Created multimodal input: " + multimodalInput.getSummary());
-            
             // Note: Image successfully preprocessed with CLIP parameters
             System.err.println("✅ Image preprocessing successful with native Java implementation");
             System.err.println("✅ Applied CLIP normalization (mean=[0.481,0.458,0.408], std=[0.269,0.261,0.276])");
-            
             String response;
             if (model instanceof Llava) {
                 System.err.println("✅ Detected LLaVA model - using multimodal inference");
                 Llava llavaModel = (Llava) model;
-                
                 try {
                     // Generate tokens using complete multimodal pipeline
                     List<Integer> responseTokens = llavaModel.generateTokensMultimodal(multimodalInput, options.maxTokens(), sampler, options);
-                    
                     // Convert tokens to text using the tokenizer
                     response = model.tokenizer().decode(responseTokens);
-                    
                     System.err.println("✅ Generated multimodal response: " + responseTokens.size() + " tokens");
                 } catch (Exception e) {
                     System.err.println("Error in multimodal generation: " + e.getMessage());
@@ -331,7 +284,6 @@ public class LlamaApp {
             if (SHOW_PERF_INTERACTIVE) {
                 LastRunMetrics.printMetrics();
             }
-            
         } catch (IOException e) {
             System.err.println("Error loading image: " + e.getMessage());
             e.printStackTrace();
@@ -367,6 +319,3 @@ public class LlamaApp {
         }
     }
 }
-
-
-
