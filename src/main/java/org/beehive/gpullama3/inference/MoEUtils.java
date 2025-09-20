@@ -215,8 +215,11 @@ public final class MoEUtils {
     /**
      * Computes router logits given input and router weights.
      *
+     * CRITICAL FIX: Router weights in GGUF are stored as [dim, num_experts] not [num_experts, dim]
+     * This means for each input dimension i, the weights for all experts are contiguous.
+     *
      * @param input Input tensor [dim]
-     * @param routerWeight Router weight matrix [numExperts, dim]
+     * @param routerWeight Router weight matrix [dim, numExperts] - FIXED: was incorrectly documented as [numExperts, dim]
      * @param numExperts Number of experts
      * @param dim Model dimension
      * @return Router logits [numExperts]
@@ -232,10 +235,14 @@ public final class MoEUtils {
 
         float[] routerLogits = new float[numExperts];
 
+        // FIXED: Changed indexing to match actual GGUF storage format [dim, numExperts]
+        // Compute: routerLogits[expert] = sum(input[i] * routerWeights[i][expert])
         for (int e = 0; e < numExperts; e++) {
             float sum = 0.0f;
             for (int d = 0; d < dim; d++) {
-                sum += routerWeight[e * dim + d] * input[d];
+                // Router weights stored as [dim, numExperts]
+                // So weight for input[d] -> expert[e] is at index: d * numExperts + e
+                sum += input[d] * routerWeight[d * numExperts + e];
             }
             routerLogits[e] = sum;
         }

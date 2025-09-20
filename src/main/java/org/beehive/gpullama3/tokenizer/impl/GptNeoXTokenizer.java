@@ -35,6 +35,7 @@ public class GptNeoXTokenizer implements Tokenizer {
     private final Pattern compiledPattern;
     private final Vocabulary vocabulary;
     private final Map<Pair<Integer, Integer>, Integer> merges;
+    private final Map<Pair<Integer, Integer>, Integer> mergePriorities;
     private final Map<String, Integer> specialTokens;
 
     public GptNeoXTokenizer(Map<String, Object> metadata, Vocabulary vocabulary) {
@@ -55,14 +56,19 @@ public class GptNeoXTokenizer implements Tokenizer {
             merges = new ArrayList<>();
         }
 
-        // Initialize merges map
+        // Initialize merges map: pair -> result token ID, and priorities map: pair -> merge order
         this.merges = new HashMap<>();
-        for (Pair<Integer, Integer> pair : merges) {
+        this.mergePriorities = new HashMap<>();
+        for (int i = 0; i < merges.size(); i++) {
+            Pair<Integer, Integer> pair = merges.get(i);
             int firstIndex = pair.first();
             int secondIndex = pair.second();
             OptionalInt mergeIndex = vocabulary.getIndex(vocabulary.get(firstIndex) + vocabulary.get(secondIndex));
             if (mergeIndex.isPresent()) {
+                // Store the result token ID
                 this.merges.put(pair, mergeIndex.getAsInt());
+                // Store merge priority (earlier in list = higher priority = lower number)
+                this.mergePriorities.put(pair, i);
             }
         }
 
@@ -237,18 +243,19 @@ public class GptNeoXTokenizer implements Tokenizer {
             return ids;
         }
 
-        // Apply BPE merges (GPT-NeoX style - lowest index first)
+        // Apply BPE merges (GPT-NeoX style - earliest in merge list has highest priority)
         while (ids.size() >= 2) {
             Pair<Integer, Integer> bestPair = null;
-            int bestMergeIndex = Integer.MAX_VALUE;
+            int bestPriority = Integer.MAX_VALUE;
 
             for (int i = 0; i < ids.size() - 1; i++) {
                 Pair<Integer, Integer> pair = new Pair<>(ids.get(i), ids.get(i + 1));
                 if (merges.containsKey(pair)) {
-                    int mergeIndex = merges.get(pair);
-                    if (mergeIndex < bestMergeIndex) {
+                    int priority = mergePriorities.get(pair);
+                    // Lower priority number = higher priority (earlier in merge list)
+                    if (priority < bestPriority) {
                         bestPair = pair;
-                        bestMergeIndex = mergeIndex;
+                        bestPriority = priority;
                     }
                 }
             }
@@ -257,6 +264,9 @@ public class GptNeoXTokenizer implements Tokenizer {
                 break; // No more merges possible
             }
 
+            // Get the result token ID for this merge
+            int resultTokenId = merges.get(bestPair);
+
             // Apply the best merge
             List<Integer> newIds = new ArrayList<>();
             int i = 0;
@@ -264,7 +274,8 @@ public class GptNeoXTokenizer implements Tokenizer {
                 if (i < ids.size() - 1 &&
                     ids.get(i).equals(bestPair.first()) &&
                     ids.get(i + 1).equals(bestPair.second())) {
-                    newIds.add(bestMergeIndex);
+                    // CRITICAL FIX: Add result token ID, not merge priority!
+                    newIds.add(resultTokenId);
                     i += 2;
                 } else {
                     newIds.add(ids.get(i));
@@ -285,13 +296,39 @@ public class GptNeoXTokenizer implements Tokenizer {
         for (Integer tokenId : tokens) {
             String tokenText = vocabulary.get(tokenId);
             if (tokenText != null) {
-                result.append(tokenText);
+                // GPT-2/GPT-NeoX uses special byte encoding:
+                // Printable ASCII stays the same
+                // Spaces become 'Ġ' (U+0120)
+                // Other bytes map to unicode range U+0100-U+01FF
+                String decoded = decodeGPT2Bytes(tokenText);
+                result.append(decoded);
             }
         }
 
         String decoded = result.toString();
         System.out.printf("[GPTNEOX-TOKENIZER] Decoded to %d characters%n", decoded.length());
         return decoded;
+    }
+
+    private String decodeGPT2Bytes(String text) {
+        StringBuilder decoded = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            // Handle GPT-2 byte encoding
+            if (c == 'Ġ') {
+                // 'Ġ' (U+0120) represents space
+                decoded.append(' ');
+            } else if (c >= 0x100 && c <= 0x1FF) {
+                // Characters in range U+0100-U+01FF map back to bytes
+                // This is the GPT-2 encoding for non-printable/special bytes
+                int byteValue = c - 0x100;
+                decoded.append((char) byteValue);
+            } else {
+                // Regular characters stay as-is
+                decoded.append(c);
+            }
+        }
+        return decoded.toString();
     }
 
     @Override

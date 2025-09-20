@@ -2336,9 +2336,11 @@ public final class InferenceCore {
             // 4. Aggregate expert outputs
             float[] aggregatedOutput = MoEUtils.aggregateExpertOutputs(expertOutputs, expertWeights, dim);
 
-            // Copy aggregated output to state
+            // CRITICAL FIX: Add residual connection
+            // Formula: h_t^l = ∑(g_{i,t} * FFN_i(u_t^l)) + u_t^l
+            // Copy aggregated output + input residual to state
             for (int i = 0; i < dim; i++) {
-                state.xb2.setFloat(i, aggregatedOutput[i]);
+                state.xb2.setFloat(i, aggregatedOutput[i] + input[i]);
             }
 
             // 5. Update MoE state for load balancing
