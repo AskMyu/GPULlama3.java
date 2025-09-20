@@ -73,9 +73,14 @@ public class GptOss extends AbstractModel {
     
     @Override
     public void forward(State state, int token, int position) {
-        // For now, use the standard inference core
-        // In the future, this would be replaced with MoE-specific inference
-        InferenceCore.forwardJava(this, state, token, position);
+        // Check weights type and route appropriately
+        if (weights() instanceof org.beehive.gpullama3.inference.weights.tornado.TornadoWeights) {
+            // Use GPU path with TornadoVM
+            InferenceCore.forwardTornadoVM(this, state, token, position, tornadoVMPlan());
+        } else {
+            // Use CPU path with StandardWeights
+            InferenceCore.forwardJava(this, state, token, position);
+        }
     }
     
     @Override

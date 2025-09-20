@@ -183,8 +183,14 @@ public class DeepSeekR1 extends AbstractModel {
 
     @Override
     public void forward(State state, int token, int position) {
-        // For now, delegate to existing inference core (can be specialized later for DeepSeek-R1 MLA/MoE features)
-        InferenceCore.forwardJava(this, state, token, position);
+        // Check weights type and route appropriately
+        if (weights() instanceof org.beehive.gpullama3.inference.weights.tornado.TornadoWeights) {
+            // Use GPU path with TornadoVM
+            InferenceCore.forwardTornadoVM(this, state, token, position, tornadoVMPlan());
+        } else {
+            // Use CPU path with StandardWeights (can be specialized later for DeepSeek-R1 MLA/MoE features)
+            InferenceCore.forwardJava(this, state, token, position);
+        }
     }
 
     /**

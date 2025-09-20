@@ -55,7 +55,13 @@ public class Mistral extends AbstractModel {
 
     @Override
     public void forward(State state, int token, int position) {
-        InferenceCore.forwardJava(this, state, token, position);
+        if (weights() instanceof org.beehive.gpullama3.inference.weights.tornado.TornadoWeights) {
+            // Use GPU path with TornadoVM
+            InferenceCore.forwardTornadoVM(this, state, token, position, tornadoVMPlan());
+        } else {
+            // Use CPU path with StandardWeights
+            InferenceCore.forwardJava(this, state, token, position);
+        }
     }
 
     @Override
