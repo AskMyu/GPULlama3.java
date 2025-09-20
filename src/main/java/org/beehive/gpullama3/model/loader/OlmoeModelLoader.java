@@ -5,6 +5,7 @@ import org.beehive.gpullama3.auxiliary.Timer;
 import org.beehive.gpullama3.core.model.GGMLType;
 import org.beehive.gpullama3.core.model.GGUF;
 import org.beehive.gpullama3.core.model.tensor.ArrayFloatTensor;
+import org.beehive.gpullama3.core.model.tensor.FloatTensor;
 import org.beehive.gpullama3.core.model.tensor.GGMLTensorEntry;
 import org.beehive.gpullama3.core.types.Pair;
 import org.beehive.gpullama3.inference.operation.RoPE;
@@ -16,13 +17,17 @@ import org.beehive.gpullama3.model.format.ChatFormat;
 import org.beehive.gpullama3.model.format.ChatFormat.ChatTokens;
 import org.beehive.gpullama3.model.olmoe.Olmoe;
 import org.beehive.gpullama3.model.olmoe.OlmoeConfiguration;
-import org.beehive.gpullama3.tokenizer.impl.GemmaTokenizer;
+import org.beehive.gpullama3.tokenizer.impl.Cl100kTokenizer;
 import org.beehive.gpullama3.tokenizer.impl.Tokenizer;
 import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
 import org.beehive.gpullama3.model.loader.batch.BatchCapableModelLoader;
 import org.beehive.gpullama3.tornadovm.TornadoVMMasterPlan;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
+import uk.ac.manchester.tornado.api.types.HalfFloat;
 import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
+import org.beehive.gpullama3.inference.weights.olmoe.OlmoeStandardWeights;
+import org.beehive.gpullama3.inference.weights.olmoe.OlmoeTornadoWeights;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -62,27 +67,35 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
 
     @Override
     protected Weights createWeightsFromTensors(Map<String, org.beehive.gpullama3.core.model.tensor.FloatTensor> tensors, Configuration config) {
-        // Use existing OLMoE weight creation logic
-        return createOlmoeWeights(tensors, config);
+        // Use new OLMoE-specific weight creation logic
+        return createOlmoeWeightsFromTensors(tensors, config);
     }
 
     /**
-     * Creates OLMoE weights from loaded tensors using existing weight creation logic
+     * Creates OLMoE weights from loaded tensors using new MoE-specific weight classes
      */
-    private Weights createOlmoeWeights(Map<String, org.beehive.gpullama3.core.model.tensor.FloatTensor> loadedTensors, Configuration config) {
-        // Simple bridge: reload original tensor entries and use existing weight creation
-        // The BatchCapableModelLoader has already loaded the tensors into memory,
-        // so this just provides the metadata needed for the existing weight creation logic
-        try {
-            Map<String, GGMLTensorEntry> tensorEntries = GGUF.loadTensors(
-                fileChannel, gguf.getTensorDataOffset(), gguf.getTensorInfos());
+    private Weights createOlmoeWeightsFromTensors(Map<String, org.beehive.gpullama3.core.model.tensor.FloatTensor> loadedTensors, Configuration config) {
+        System.err.printf("[OLMOE-NEW] Creating OLMoE weights from %d loaded tensors%n", loadedTensors.size());
 
-            System.err.printf("[OLMOE-BRIDGE] Loaded %d tensor entries for weight creation%n", tensorEntries.size());
+        // Get RoPE frequencies
+        Pair<float[], float[]> ropeFreqs = RoPE.precomputeFreqsCis(
+                config.contextLength(),
+                config.headSize(),
+                config.ropeTheta(),
+                false,
+                0, 0, 0, 0
+        );
 
-            // Use existing weight creation logic with all available tensors
-            return loadWeightsOlmoeOriginal(tensorEntries, config);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to reload tensor entries for OLMoE weight creation", e);
+        // Get token embeddings and output weight
+        org.beehive.gpullama3.core.model.tensor.FloatTensor tokenEmbeddings = loadedTensors.get("token_embd.weight");
+        org.beehive.gpullama3.core.model.tensor.FloatTensor outputWeight = loadedTensors.getOrDefault("output.weight", tokenEmbeddings);
+
+        if (Options.getDefaultOptions().useTornadovm()) {
+            System.err.println("[OLMOE-NEW] Creating TornadoVM weights");
+            return createOlmoeTornadoWeights(loadedTensors, config, ropeFreqs, tokenEmbeddings, outputWeight);
+        } else {
+            System.err.println("[OLMOE-NEW] Creating standard weights");
+            return createOlmoeStandardWeights(loadedTensors, config, ropeFreqs, tokenEmbeddings, outputWeight);
         }
     }
 
@@ -95,8 +108,8 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             // Load OLMoE-specific vocabulary
             Vocabulary vocabulary = loadOlmoeVocabulary(metadata);
             
-            // Create tokenizer - OLMoE uses GPT-2 style tokenizer, similar to Gemma
-            Tokenizer tokenizer = new GemmaTokenizer(vocabulary);
+            // Create tokenizer - OLMoE uses cl100k_base tokenizer (same as GPT-3.5/GPT-4)
+            Tokenizer tokenizer = new Cl100kTokenizer(metadata, vocabulary);
 
             // Get context length from metadata
             int modelContextLength = getContextLength(metadata);
@@ -115,10 +128,10 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 weights = loadWeights(tensorEntries, config);
             }
 
-            // OLMoE chat format
+            // OLMoE chat format - Tulu template (FIXED from OpenAI format)
             ChatTokens chatTokens = new ChatTokens(
-                "<|im_start|>",      // Start header
-                "<|im_end|>",        // End header
+                "<|user|>",          // Correct Tulu format start header
+                "<|assistant|>",     // Correct Tulu format end header
                 "",                  // Assistant prefix
                 "<|endoftext|>",     // End of text
                 ""                   // No special reasoning token
@@ -443,4 +456,215 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
         );
     }
     // @formatter:on
+
+    /**
+     * Creates OLMoE standard weights from loaded tensors with proper MoE structure
+     */
+    private Weights createOlmoeStandardWeights(Map<String, org.beehive.gpullama3.core.model.tensor.FloatTensor> loadedTensors,
+                                              Configuration config,
+                                              Pair<float[], float[]> ropeFreqs,
+                                              org.beehive.gpullama3.core.model.tensor.FloatTensor tokenEmbeddings,
+                                              org.beehive.gpullama3.core.model.tensor.FloatTensor outputWeight) {
+
+        int numLayers = config.numberOfLayers();
+
+        // Load standard attention weights (same as Llama)
+        FloatTensor[] attentionNorms = new FloatTensor[numLayers];
+        FloatTensor[] queryWeights = new FloatTensor[numLayers];
+        FloatTensor[] keyWeights = new FloatTensor[numLayers];
+        FloatTensor[] valueWeights = new FloatTensor[numLayers];
+        FloatTensor[] outputWeights = new FloatTensor[numLayers];
+        FloatTensor[] ffnNorms = new FloatTensor[numLayers];
+
+        // Load MoE-specific weights
+        FloatTensor[] routerWeights = new FloatTensor[numLayers];
+        FloatTensor[] expertGateWeights = new FloatTensor[numLayers];
+        FloatTensor[] expertDownWeights = new FloatTensor[numLayers];
+        FloatTensor[] expertUpWeights = new FloatTensor[numLayers];
+
+        for (int i = 0; i < numLayers; i++) {
+            // Standard attention weights
+            attentionNorms[i] = loadedTensors.get("blk." + i + ".attn_norm.weight");
+            queryWeights[i] = loadedTensors.get("blk." + i + ".attn_q.weight");
+            keyWeights[i] = loadedTensors.get("blk." + i + ".attn_k.weight");
+            valueWeights[i] = loadedTensors.get("blk." + i + ".attn_v.weight");
+            outputWeights[i] = loadedTensors.getOrDefault("blk." + i + ".attn_output.weight",
+                                                        loadedTensors.get("blk." + i + ".attn_out.weight"));
+            ffnNorms[i] = loadedTensors.get("blk." + i + ".ffn_norm.weight");
+
+            // MoE-specific weights
+            routerWeights[i] = loadedTensors.get("blk." + i + ".ffn_gate_inp.weight");
+            expertGateWeights[i] = loadedTensors.get("blk." + i + ".ffn_gate_exps.weight");
+            expertDownWeights[i] = loadedTensors.get("blk." + i + ".ffn_down_exps.weight");
+            expertUpWeights[i] = loadedTensors.get("blk." + i + ".ffn_up_exps.weight");
+
+            // Validate required tensors
+            if (routerWeights[i] == null) {
+                throw new IllegalArgumentException("Missing router weights for layer " + i + ": blk." + i + ".ffn_gate_inp.weight");
+            }
+            if (expertGateWeights[i] == null) {
+                throw new IllegalArgumentException("Missing expert gate weights for layer " + i + ": blk." + i + ".ffn_gate_exps.weight");
+            }
+            if (expertDownWeights[i] == null) {
+                throw new IllegalArgumentException("Missing expert down weights for layer " + i + ": blk." + i + ".ffn_down_exps.weight");
+            }
+            if (expertUpWeights[i] == null) {
+                throw new IllegalArgumentException("Missing expert up weights for layer " + i + ": blk." + i + ".ffn_up_exps.weight");
+            }
+        }
+
+        // Output norm
+        FloatTensor outputNorm = loadedTensors.getOrDefault("output_norm.weight", loadedTensors.get("norm.weight"));
+        if (outputNorm == null) {
+            throw new IllegalArgumentException("Missing output norm weight");
+        }
+
+        return new OlmoeStandardWeights(
+                tokenEmbeddings,
+                attentionNorms,
+                queryWeights,
+                keyWeights,
+                valueWeights,
+                outputWeights,
+                ffnNorms,
+                routerWeights,
+                expertGateWeights,
+                expertDownWeights,
+                expertUpWeights,
+                outputNorm,
+                new ArrayFloatTensor(ropeFreqs.first()),
+                new ArrayFloatTensor(ropeFreqs.second()),
+                outputWeight,
+                GGMLType.F32
+        );
+    }
+
+    /**
+     * Creates OLMoE TornadoVM weights from loaded tensors with proper MoE structure
+     */
+    private Weights createOlmoeTornadoWeights(Map<String, org.beehive.gpullama3.core.model.tensor.FloatTensor> loadedTensors,
+                                             Configuration config,
+                                             Pair<float[], float[]> ropeFreqs,
+                                             org.beehive.gpullama3.core.model.tensor.FloatTensor tokenEmbeddings,
+                                             org.beehive.gpullama3.core.model.tensor.FloatTensor outputWeight) {
+
+        int numLayers = config.numberOfLayers();
+
+        // Load standard attention weights as FloatArrays/HalfFloatArrays for TornadoVM
+        FloatArray[] attentionNorms = new FloatArray[numLayers];      // Norms stay as FloatArray
+        HalfFloatArray[] queryWeights = new HalfFloatArray[numLayers]; // Weights as HalfFloatArray
+        HalfFloatArray[] keyWeights = new HalfFloatArray[numLayers];
+        HalfFloatArray[] valueWeights = new HalfFloatArray[numLayers];
+        HalfFloatArray[] outputWeights = new HalfFloatArray[numLayers];
+        FloatArray[] ffnNorms = new FloatArray[numLayers];
+
+        // Load MoE-specific weights as FloatArrays
+        FloatArray[] routerWeights = new FloatArray[numLayers];
+        FloatArray[] expertGateWeights = new FloatArray[numLayers];
+        FloatArray[] expertDownWeights = new FloatArray[numLayers];
+        FloatArray[] expertUpWeights = new FloatArray[numLayers];
+
+        for (int i = 0; i < numLayers; i++) {
+            // Convert standard weights to FloatArrays
+            attentionNorms[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".attn_norm.weight"));
+            queryWeights[i] = convertToHalfFloatArray(loadedTensors.get("blk." + i + ".attn_q.weight"));
+            keyWeights[i] = convertToHalfFloatArray(loadedTensors.get("blk." + i + ".attn_k.weight"));
+            valueWeights[i] = convertToHalfFloatArray(loadedTensors.get("blk." + i + ".attn_v.weight"));
+            outputWeights[i] = convertToHalfFloatArray(loadedTensors.getOrDefault("blk." + i + ".attn_output.weight",
+                                                                                 loadedTensors.get("blk." + i + ".attn_out.weight")));
+            ffnNorms[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_norm.weight"));
+
+            // Convert MoE weights to FloatArrays
+            routerWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_gate_inp.weight"));
+            expertGateWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_gate_exps.weight"));
+            expertDownWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_down_exps.weight"));
+            expertUpWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_up_exps.weight"));
+
+            // Validate required tensors
+            if (routerWeights[i] == null) {
+                throw new IllegalArgumentException("Missing router weights for layer " + i);
+            }
+        }
+
+        // Convert output weights
+        FloatArray outputNormArray = convertToFloatArray(loadedTensors.getOrDefault("output_norm.weight",
+                                                                                   loadedTensors.get("norm.weight")));
+        if (outputNormArray == null) {
+            throw new IllegalArgumentException("Missing output norm weight");
+        }
+
+        // Create placeholder arrays for w1/w2/w3 since OLMoE uses expert weights instead
+        int layerCount = attentionNorms.length;
+        HalfFloatArray[] w1Placeholder = new HalfFloatArray[layerCount];
+        HalfFloatArray[] w2Placeholder = new HalfFloatArray[layerCount];
+        HalfFloatArray[] w3Placeholder = new HalfFloatArray[layerCount];
+
+        // Initialize placeholders as empty arrays
+        for (int i = 0; i < layerCount; i++) {
+            w1Placeholder[i] = new HalfFloatArray(1); // Minimal placeholder
+            w2Placeholder[i] = new HalfFloatArray(1);
+            w3Placeholder[i] = new HalfFloatArray(1);
+        }
+
+        return new OlmoeTornadoWeights(
+                convertToFloatArray(tokenEmbeddings),  // tokenEmbeddingTable
+                attentionNorms,                        // rms_att_weightLayered
+                queryWeights,                          // wqLayered
+                keyWeights,                            // wkLayered
+                valueWeights,                          // wvLayered
+                outputWeights,                         // woLayered
+                ffnNorms,                              // rms_ffn_weightLayered
+                w1Placeholder,                         // w1Layered (placeholder for OLMoE)
+                w2Placeholder,                         // w2Layered (placeholder for OLMoE)
+                w3Placeholder,                         // w3Layered (placeholder for OLMoE)
+                outputNormArray,                       // rms_final_weight_as_floatArray
+                FloatArray.fromArray(ropeFreqs.first()), // freq_cis_realFlat
+                FloatArray.fromArray(ropeFreqs.second()), // freq_cis_imagFlat
+                convertToHalfFloatArray(outputWeight), // wclsHalfFloat
+                GGMLType.F32,                          // weightType
+                routerWeights,                         // MoE-specific: routerWeights
+                expertGateWeights,                     // MoE-specific: expertGateWeights
+                expertDownWeights,                     // MoE-specific: expertDownWeights
+                expertUpWeights                        // MoE-specific: expertUpWeights
+        );
+    }
+
+    /**
+     * Converts a FloatTensor to FloatArray for TornadoVM
+     */
+    private FloatArray convertToFloatArray(org.beehive.gpullama3.core.model.tensor.FloatTensor tensor) {
+        if (tensor == null) return null;
+
+        int size = tensor.size();
+        FloatArray array = new FloatArray(size);
+
+        for (int i = 0; i < size; i++) {
+            array.set(i, tensor.getFloat(i));
+        }
+
+        return array;
+    }
+
+    /**
+     * Converts a FloatTensor to HalfFloatArray for TornadoVM
+     * Simple implementation that creates a HalfFloatArray from the FloatArray
+     */
+    private HalfFloatArray convertToHalfFloatArray(org.beehive.gpullama3.core.model.tensor.FloatTensor tensor) {
+        if (tensor == null) {
+            return null;
+        }
+
+        // First convert to FloatArray, then create HalfFloatArray from it
+        FloatArray floatArray = convertToFloatArray(tensor);
+        if (floatArray == null) {
+            return null;
+        }
+
+        // Create HalfFloatArray and copy data
+        HalfFloatArray halfFloatArray = new HalfFloatArray(floatArray.getSize());
+        for (int i = 0; i < floatArray.getSize(); i++) {
+            halfFloatArray.set(i, new HalfFloat(floatArray.get(i)));
+        }
+        return halfFloatArray;
+    }
 }

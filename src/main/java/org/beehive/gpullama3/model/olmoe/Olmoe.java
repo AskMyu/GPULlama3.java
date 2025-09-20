@@ -29,6 +29,11 @@ public class Olmoe extends AbstractModel {
     public Olmoe(OlmoeConfiguration configuration, Tokenizer tokenizer, Weights weights, ChatFormat chatFormat) {
         super(tokenizer, weights, chatFormat, null);
         this.configuration = configuration;
+        System.err.println("[OLMOE-CONSTRUCTOR-DEBUG] OLMoE model instantiated successfully!");
+        System.err.printf("[OLMOE-CONSTRUCTOR-DEBUG] Configuration: %d experts, %d active, dim=%d%n",
+                         configuration.numberOfExperts(),
+                         configuration.numberOfActiveExperts(),
+                         configuration.dim());
     }
 
     public OlmoeConfiguration configuration() {
@@ -83,11 +88,17 @@ public class Olmoe extends AbstractModel {
 
     @Override
     public void forward(State state, int token, int position) {
+        System.err.printf("[OLMOE-FORWARD-DEBUG] plan=%s, tornadoVMPlan()=%s%n",
+                         plan, (plan != null) ? "available" : "null");
+
         if (plan == null) {
-            // OLMoE-specific forward pass with MoE routing
+            // OLMoE-specific forward pass with MoE routing (CPU)
+            System.err.println("[OLMOE-FORWARD-DEBUG] Using CPU forward pass - plan is null");
             InferenceCore.forwardJavaOlmoe(this, (OlmoeState) state, token, position);
         } else {
-            InferenceCore.forwardTornadoVM(this, state, token, position, tornadoVMPlan());
+            // OLMoE-specific GPU forward pass with MoE routing
+            System.err.println("[OLMOE-FORWARD-DEBUG] Using GPU forward pass - calling forwardTornadoVMOlmoe");
+            InferenceCore.forwardTornadoVMOlmoe(this, (OlmoeState) state, token, position, tornadoVMPlan());
         }
     }
 

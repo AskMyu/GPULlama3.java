@@ -236,8 +236,9 @@ public final class InferenceEngine {
                 int processedInBatch = 0;
                 try {
                     for (int pos = batchStart; pos < batchStart + currentBatchSize; pos++) {
-                        // Use dummy token (0) for vision positions - the forwardTornadoVM handles VLM state
-                        FloatArray posLogits = InferenceCore.forwardTornadoVM(model, state, 0, pos, model.tornadoVMPlan());
+                        // Use dummy token (0) for vision positions - model.forward() handles model-specific logic
+                        model.forward(state, 0, pos);
+                        FloatArray posLogits = state.wrapLogits;
                         processedInBatch++;
                     }
                 } catch (Exception e) {
@@ -670,9 +671,10 @@ public final class InferenceEngine {
 
         // Main generation loop
         while (pos < actualMaxTokens) {
-            // GPU Forward Pass - No conditional check since we know we're using GPU
-            System.err.printf("[INFERENCE-DEBUG] About to call forwardTornadoVM: currentToken=%d, pos=%d%n", currentToken, pos);
-            FloatArray logits = InferenceCore.forwardTornadoVM(model, state, currentToken, pos, tornadoVMPlan);
+            // GPU Forward Pass - Call model.forward() to handle model-specific logic (e.g., OLMoE routing)
+            System.err.printf("[INFERENCE-DEBUG] About to call model.forward(): currentToken=%d, pos=%d%n", currentToken, pos);
+            model.forward(state, currentToken, pos);
+            FloatArray logits = state.wrapLogits;
 
             // CRITICAL DEBUG: Track prompt processing state
             System.err.printf("[PROMPT-DEBUG] promptIndex=%d, promptTokens.size()=%d, pos=%d%n", promptIndex, promptTokens.size(), pos);
@@ -928,8 +930,9 @@ public final class InferenceEngine {
         int pos = startPosition;
 
         while (pos < maxTokens) {
-            // GPU Forward Pass
-            FloatArray logits = InferenceCore.forwardTornadoVM(model, state, currentToken, pos, tornadoVMPlan);
+            // GPU Forward Pass - Call model.forward() to handle model-specific logic (e.g., OLMoE routing)
+            model.forward(state, currentToken, pos);
+            FloatArray logits = state.wrapLogits;
 
             // Handle token processing
             if (promptIndex < promptTokens.size()) {
