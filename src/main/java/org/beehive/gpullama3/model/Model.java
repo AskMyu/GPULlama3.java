@@ -271,8 +271,29 @@ public interface Model {
                 sb.append(tokenizer().decode(List.of(token)));
             }
             responseText = sb.toString();
+
+            // Clean up the output by replacing GPT-NeoX space tokens (Ġ) with actual spaces
+            String cleanedText = responseText.replace("Ġ", " ");
+
             System.err.printf("[WORKAROUND] Using individual token decode: '%s'%n", responseText);
             System.err.printf("[FINAL-DECODE] Complete decode result: '%s' (length=%d)%n", responseText, responseText.length());
+            System.err.printf("[CLEANED-OUTPUT] Human-readable result: '%s' (length=%d)%n", cleanedText, cleanedText.length());
+
+            // DEBUG: Check for repetitive tokens in the output
+            java.util.Map<Integer, Integer> tokenCounts = new java.util.HashMap<>();
+            for (int token : responseTokens) {
+                tokenCounts.put(token, tokenCounts.getOrDefault(token, 0) + 1);
+            }
+            System.err.printf("[TOKEN-ANALYSIS] Analyzing %d generated tokens for repetition...%n", responseTokens.size());
+            tokenCounts.entrySet().stream()
+                .filter(entry -> entry.getValue() > 1)
+                .sorted((a, b) -> b.getValue().compareTo(a.getValue()))
+                .limit(5)
+                .forEach(entry -> {
+                    String decoded = tokenizer().decode(java.util.List.of(entry.getKey()));
+                    System.err.printf("[TOKEN-ANALYSIS] Token %d ('%s') appears %d times%n",
+                                    entry.getKey(), decoded, entry.getValue());
+                });
             // Add the forced <think>\n prefix for non-streaming output
             if (shouldIncludeReasoning()) {
                 responseText = "<think>\n" + responseText;

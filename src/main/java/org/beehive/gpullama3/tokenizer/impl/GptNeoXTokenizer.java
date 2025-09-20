@@ -198,35 +198,43 @@ public class GptNeoXTokenizer implements Tokenizer {
     }
 
     private List<Integer> encodeChunk(String chunk) {
-        // GPT-NeoX-style encoding: convert to character tokens then apply BPE
+        // FIXED: Proper GPT-NeoX BPE encoding starting from UTF-8 bytes
         List<Integer> ids = new ArrayList<>();
 
-        for (int i = 0; i < chunk.length(); i++) {
-            char c = chunk.charAt(i);
-            String charStr = String.valueOf(c);
-            OptionalInt tokenId = vocabulary.getIndex(charStr);
+        // First, check if the entire chunk exists as a token in vocabulary
+        OptionalInt wholeTokenId = vocabulary.getIndex(chunk);
+        if (wholeTokenId.isPresent()) {
+            ids.add(wholeTokenId.getAsInt());
+            return ids;
+        }
 
-            if (tokenId.isPresent()) {
-                ids.add(tokenId.getAsInt());
-            } else {
-                // Handle unknown character with UTF-8 byte encoding
-                try {
-                    byte[] bytes = charStr.getBytes("UTF-8");
-                    for (byte byteVal : bytes) {
-                        int unsignedByte = byteVal & 0xFF;
-                        OptionalInt byteTokenId = vocabulary.getIndex(String.valueOf(unsignedByte));
-                        if (byteTokenId.isPresent()) {
-                            ids.add(byteTokenId.getAsInt());
-                        } else {
-                            // Ultimate fallback: use space token or 0
-                            OptionalInt spaceToken = vocabulary.getIndex(" ");
-                            ids.add(spaceToken.orElse(0));
-                        }
+        // Convert string to UTF-8 bytes (proper BPE approach)
+        try {
+            byte[] bytes = chunk.getBytes("UTF-8");
+            for (byte byteVal : bytes) {
+                int unsignedByte = byteVal & 0xFF;
+                // Map byte to token using standard byte-to-token mapping
+                String byteStr = new String(new byte[]{byteVal}, "UTF-8");
+                OptionalInt byteTokenId = vocabulary.getIndex(byteStr);
+
+                if (byteTokenId.isPresent()) {
+                    ids.add(byteTokenId.getAsInt());
+                } else {
+                    // Fallback to byte value as token ID if available
+                    if (unsignedByte < vocabulary.size()) {
+                        ids.add(unsignedByte);
+                    } else {
+                        // Ultimate fallback
+                        OptionalInt unkToken = vocabulary.getIndex("<unk>");
+                        ids.add(unkToken.orElse(0));
                     }
-                } catch (Exception e) {
-                    ids.add(0); // Ultimate fallback
                 }
             }
+        } catch (Exception e) {
+            // Ultimate fallback for any encoding errors
+            OptionalInt unkToken = vocabulary.getIndex("<unk>");
+            ids.add(unkToken.orElse(0));
+            return ids;
         }
 
         // Apply BPE merges (GPT-NeoX style - lowest index first)

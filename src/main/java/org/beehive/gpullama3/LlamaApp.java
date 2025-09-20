@@ -209,6 +209,20 @@ public class LlamaApp {
                     }
                     System.err.printf("[%s-SAMPLER] Probabilities AFTER softmax: max=%.9f (token %d), min_positive=%.9f, non-zero: %d/%d, sum=%.9f%n",
                         modelTypeName, maxLogit, maxProbIdx, minLogit, nonZeroCount, arrayLogits.getSize(), totalSum);
+
+                    // CRITICAL DEBUG: Check probability of problematic token 21132 ("ierra")
+                    if (arrayLogits.getSize() > 21132) {
+                        float token21132Prob = arrayLogits.get(21132);
+                        System.err.printf("[%s-SAMPLER] CRITICAL: Token 21132 ('ierra') probability=%.9f%n", modelTypeName, token21132Prob);
+
+                        // Check if it's in top-10 probabilities
+                        int rank = 1;
+                        for (int i = 0; i < arrayLogits.getSize(); i++) {
+                            if (arrayLogits.get(i) > token21132Prob) rank++;
+                        }
+                        System.err.printf("[%s-SAMPLER] CRITICAL: Token 21132 ('ierra') rank=%d out of %d%n", modelTypeName, rank, arrayLogits.getSize());
+                    }
+
                     System.err.printf("[%s-SAMPLER] FloatArray size AFTER processing: %d%n", modelTypeName, arrayLogits.getSize());
                 } else {
                     // If logits are neither FloatTensor nor FloatArray, throw an exception

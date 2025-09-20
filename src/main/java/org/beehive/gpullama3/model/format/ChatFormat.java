@@ -26,6 +26,14 @@ public interface ChatFormat {
         };
     }
 
+    /**
+     * Creates OLMoE-specific Tulu chat format for Instruct models.
+     * This should be used for OLMoE Instruct models that require the Tulu template.
+     */
+    static ChatFormat createOLMoETulu(GptNeoXTokenizer tokenizer) {
+        return new OLMoETuluChatFormat(tokenizer);
+    }
+
     default ChatTokens chatTokens() {
         throw new UnsupportedOperationException("ChatFormat for Llama and Mistral does not support chatTokens");
     }

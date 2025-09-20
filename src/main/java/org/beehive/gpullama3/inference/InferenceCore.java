@@ -2492,6 +2492,34 @@ public final class InferenceCore {
         }
         System.err.printf("[FINAL-DEBUG] Raw logits sum of first 5: %.6f%n", logitsSum);
 
+        // CRITICAL DEBUG: Check raw logits for token 21132 before sampling
+        if (vocabularySize > 21132) {
+            float token21132Logit = state.logits.getFloat(21132);
+            System.err.printf("[CRITICAL-LOGITS-DEBUG] Token 21132 ('ierra') raw logit=%.6f%n", token21132Logit);
+
+            // Check ranking of token 21132 in raw logits
+            int token21132Rank = 1;
+            for (int i = 0; i < vocabularySize; i++) {
+                if (state.logits.getFloat(i) > token21132Logit) {
+                    token21132Rank++;
+                }
+            }
+            System.err.printf("[CRITICAL-LOGITS-DEBUG] Token 21132 ('ierra') rank=%d out of %d in RAW logits%n",
+                             token21132Rank, vocabularySize);
+
+            // Find max logit and its token for comparison
+            float maxLogit = Float.NEGATIVE_INFINITY;
+            int maxLogitToken = -1;
+            for (int i = 0; i < vocabularySize; i++) {
+                float logit = state.logits.getFloat(i);
+                if (logit > maxLogit) {
+                    maxLogit = logit;
+                    maxLogitToken = i;
+                }
+            }
+            System.err.printf("[CRITICAL-LOGITS-DEBUG] Max raw logit=%.6f (token %d)%n", maxLogit, maxLogitToken);
+        }
+
         // Copy logits to wrapLogits for TornadoVM compatibility
         for (int i = 0; i < vocabularySize; i++) {
             state.wrapLogits.set(i, state.logits.getFloat(i));
@@ -2561,8 +2589,9 @@ public final class InferenceCore {
         }
 
         // Multi-head attention computation
+        int kvDim = (config.dim() * config.numberOfKeyValueHeads()) / config.numberOfHeads();
         float[] attentionOutput = computeMultiHeadAttention(queryOutput, keyOutput, valueOutput,
-                                                          state, layer, position, numHeads, headDim);
+                                                          state, layer, position, numHeads, headDim, kvDim);
 
         // Attention output projection
         float[] projectedOutput = new float[dim];
@@ -2645,11 +2674,21 @@ public final class InferenceCore {
         float[] routerLogits = new float[numberOfExperts];
         uk.ac.manchester.tornado.api.types.arrays.FloatArray routerArray = olmoeWeights.routerWeightsArray(layer);
 
-        // Debug: Check router weights before computation
+        // CRITICAL DEBUG: Check router weight dimensions
         if (layer == 0 || layer == config.numberOfLayers() - 1) {
             float routerSum = 0.0f;
             float routerMax = Float.NEGATIVE_INFINITY;
             int routerSize = routerArray.getSize();
+
+            // Expected: router weights should be [input_dim, num_experts] = [2048, 64] = 131072 total
+            int expectedSize = dim * numberOfExperts;
+            System.err.printf("[ROUTER-DIMENSION-DEBUG] Layer %d: Expected router size=%d (dim=%d * experts=%d), actual size=%d%n",
+                            layer, expectedSize, dim, numberOfExperts, routerSize);
+
+            if (routerSize != expectedSize) {
+                System.err.printf("[ROUTER-DIMENSION-ERROR] Layer %d: DIMENSION MISMATCH! Router weights not properly sized%n", layer);
+            }
+
             for (int i = 0; i < Math.min(100, routerSize); i++) {
                 float val = routerArray.get(i);
                 routerSum += Math.abs(val);
@@ -2657,6 +2696,19 @@ public final class InferenceCore {
             }
             System.err.printf("[ROUTER-DEBUG] Layer %d: Router array size=%d, avg(first100)=%.6f, max(first100)=%.6f%n",
                             layer, routerSize, routerSum/100, routerMax);
+
+            // Check if Expert 42's weights are different from others
+            if (routerSize >= numberOfExperts * dim) {
+                float expert42Sum = 0.0f;
+                float expert0Sum = 0.0f;
+                for (int i = 0; i < dim; i++) {
+                    // Router weights stored as [input_dim, num_experts], so Expert j's weights are at j + i*num_experts
+                    expert42Sum += Math.abs(routerArray.get(42 + i * numberOfExperts));
+                    expert0Sum += Math.abs(routerArray.get(0 + i * numberOfExperts));
+                }
+                System.err.printf("[ROUTER-EXPERT-DEBUG] Layer %d: Expert 0 weight sum=%.6f, Expert 42 weight sum=%.6f%n",
+                                layer, expert0Sum, expert42Sum);
+            }
         }
 
         FloatTensor routerWeights = convertFloatArrayToTensor(routerArray);
@@ -2670,17 +2722,33 @@ public final class InferenceCore {
             System.err.printf("[ROUTER-DEBUG] Layer 0: After tensor conversion, avg(first100)=%.6f%n", tensorSum/100);
         }
 
-        // CRITICAL FIX: Router computation should be routerWeights @ ffnNormalized
-        // Router weights shape: [num_experts, dim], input shape: [dim] -> output: [num_experts]
-        FloatTensor ffnTensor = convertArrayToTensor(ffnNormalized);
-        FloatTensor logitsTensor = convertArrayToTensor(routerLogits);
+        // CRITICAL FIX: Router computation with correct dimensions
+        // Router weights are stored as [input_dim, num_experts] = [2048, 64]
+        // We need to compute: routerLogits[expert] = sum(input[i] * routerWeights[i][expert])
+        // This is equivalent to: output = input^T @ routerWeights
 
-        // Perform correct matrix-vector multiplication: [64, 2048] @ [2048] = [64]
-        routerWeights.matmul(ffnTensor, logitsTensor, numberOfExperts, dim);
-
-        // Copy results back to array
-        for (int i = 0; i < numberOfExperts; i++) {
-            routerLogits[i] = logitsTensor.getFloat(i);
+        if (routerArray.getSize() == dim * numberOfExperts) {
+            // Manual matrix-vector multiplication with correct indexing
+            for (int expert = 0; expert < numberOfExperts; expert++) {
+                float logit = 0.0f;
+                for (int i = 0; i < dim; i++) {
+                    // Router weights stored as [input_dim, num_experts]
+                    // So weight for input[i] -> expert[j] is at index: i * numberOfExperts + j
+                    float weight = routerArray.get(i * numberOfExperts + expert);
+                    logit += ffnNormalized[i] * weight;
+                }
+                routerLogits[expert] = logit;
+            }
+            System.err.printf("[ROUTER-MATMUL-DEBUG] Layer %d: Manual matrix-vector multiplication completed%n", layer);
+        } else {
+            System.err.printf("[ROUTER-MATMUL-ERROR] Layer %d: Cannot perform matmul - wrong dimensions%n", layer);
+            // Fallback to old method (will likely be wrong but won't crash)
+            FloatTensor ffnTensor = convertArrayToTensor(ffnNormalized);
+            FloatTensor logitsTensor = convertArrayToTensor(routerLogits);
+            routerWeights.matmul(ffnTensor, logitsTensor, numberOfExperts, dim);
+            for (int i = 0; i < numberOfExperts; i++) {
+                routerLogits[i] = logitsTensor.getFloat(i);
+            }
         }
 
         // Debug: Check router logits after matmul
@@ -2701,22 +2769,44 @@ public final class InferenceCore {
         int[] selectedExperts = org.beehive.gpullama3.inference.MoEUtils.selectTopKExperts(routerLogits, numActiveExperts);
         float[] expertWeights = org.beehive.gpullama3.inference.MoEUtils.computeExpertWeights(routerLogits, selectedExperts);
 
-        // Debug: Log expert selection details
+        // ENHANCED DEBUG: Log detailed expert selection and routing analysis
         if (layer == 0 || layer == config.numberOfLayers() - 1) {  // Log first and last layer
-            System.err.printf("[MOE-ROUTING] Layer %d: Selected experts: ", layer);
-            for (int i = 0; i < Math.min(3, numActiveExperts); i++) {
-                System.err.printf("%d(%.3f) ", selectedExperts[i], expertWeights[i]);
+            System.err.printf("[MOE-ROUTING-DETAILED] Layer %d: Selected experts and weights:%n", layer);
+            for (int i = 0; i < numActiveExperts; i++) {
+                System.err.printf("  Expert %d: logit=%.6f, weight=%.6f%n",
+                                selectedExperts[i], routerLogits[selectedExperts[i]], expertWeights[i]);
             }
-            System.err.println();
 
             // Check router logits distribution
             float maxLogit = Float.NEGATIVE_INFINITY;
             float minLogit = Float.POSITIVE_INFINITY;
+            float avgLogit = 0.0f;
             for (float logit : routerLogits) {
                 maxLogit = Math.max(maxLogit, logit);
                 minLogit = Math.min(minLogit, logit);
+                avgLogit += logit;
             }
-            System.err.printf("[MOE-ROUTING] Layer %d: Router logits range: [%.3f, %.3f]%n", layer, minLogit, maxLogit);
+            avgLogit /= numberOfExperts;
+
+            System.err.printf("[MOE-ROUTING-DETAILED] Layer %d: Router logits stats: min=%.6f, max=%.6f, avg=%.6f%n",
+                            layer, minLogit, maxLogit, avgLogit);
+
+            // Check if routing is diverse or concentrated
+            float sumWeights = 0.0f;
+            for (float weight : expertWeights) {
+                sumWeights += weight;
+            }
+            System.err.printf("[MOE-ROUTING-DETAILED] Layer %d: Expert weights sum=%.6f (should be ~1.0)%n",
+                            layer, sumWeights);
+
+            // Log top 5 router logits to see full ranking
+            System.err.printf("[MOE-ROUTING-DETAILED] Layer %d: Top 5 router logits: ", layer);
+            float[] sortedLogits = routerLogits.clone();
+            java.util.Arrays.sort(sortedLogits);
+            for (int i = numberOfExperts - 1; i >= numberOfExperts - 5; i--) {
+                System.err.printf("%.3f ", sortedLogits[i]);
+            }
+            System.err.println();
         }
 
         // Expert processing and aggregation
@@ -3944,9 +4034,12 @@ public final class InferenceCore {
      */
     private static float[] computeMultiHeadAttention(float[] query, float[] key, float[] value,
                                                    OlmoeState state, int layer, int position,
-                                                   int numHeads, int headDim) {
+                                                   int numHeads, int headDim, int kvDim) {
         int seqLen = position + 1; // Current sequence length
         float[] output = new float[query.length];
+
+        System.err.printf("[KV-CACHE-FIX] Layer %d, Position %d: Using proper KV cache for %d previous positions%n",
+            layer, position, position);
 
         // For each attention head
         for (int head = 0; head < numHeads; head++) {
@@ -3969,9 +4062,11 @@ public final class InferenceCore {
                         score += currentQuery[i] * key[headOffset + i];
                     }
                 } else {
-                    // Previous positions - would need to be stored in KV cache
-                    // For now, use a simplified approach (this should be improved)
-                    score = 0.1f; // Placeholder
+                    // Previous positions - retrieve from KV cache
+                    for (int i = 0; i < headDim; i++) {
+                        float cachedKey = state.keyCache[layer].getFloat(pos * kvDim + headOffset + i);
+                        score += currentQuery[i] * cachedKey;
+                    }
                 }
 
                 scores[pos] = score / (float) Math.sqrt(headDim); // Scale by sqrt(d_k)
@@ -3997,10 +4092,10 @@ public final class InferenceCore {
                         headOutput[i] += scores[pos] * value[headOffset + i];
                     }
                 } else {
-                    // Previous positions - would use KV cache values
-                    // For now, simplified (this should be improved)
+                    // Previous positions - retrieve from KV cache
                     for (int i = 0; i < headDim; i++) {
-                        headOutput[i] += scores[pos] * 0.1f; // Placeholder
+                        float cachedValue = state.valueCache[layer].getFloat(pos * kvDim + headOffset + i);
+                        headOutput[i] += scores[pos] * cachedValue;
                     }
                 }
             }

@@ -128,16 +128,24 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 weights = loadWeights(tensorEntries, config);
             }
 
-            // OLMoE chat format - Tulu template (FIXED from OpenAI format)
-            ChatTokens chatTokens = new ChatTokens(
-                "<|user|>",          // Correct Tulu format start header
-                "<|assistant|>",     // Correct Tulu format end header
-                "",                  // Assistant prefix
-                "<|endoftext|>",     // End of text
-                ""                   // No special reasoning token
-            );
-            
-            return new Olmoe(config, tokenizer, weights, ChatFormat.create(tokenizer, chatTokens));
+            // OLMoE Instruct models use Tulu chat template - detect and use appropriate format
+            ChatFormat chatFormat;
+            if (isInstructModel(metadata)) {
+                System.err.println("[OLMOE-CHAT-FORMAT] Detected Instruct model - using Tulu chat template");
+                chatFormat = ChatFormat.createOLMoETulu((GptNeoXTokenizer) tokenizer);
+            } else {
+                System.err.println("[OLMOE-CHAT-FORMAT] Base model detected - using generic format");
+                ChatTokens chatTokens = new ChatTokens(
+                    "<|user|>",          // Correct Tulu format start header
+                    "<|assistant|>",     // Correct Tulu format end header
+                    "",                  // Assistant prefix
+                    "<|endoftext|>",     // End of text
+                    ""                   // No special reasoning token
+                );
+                chatFormat = ChatFormat.create(tokenizer, chatTokens);
+            }
+
+            return new Olmoe(config, tokenizer, weights, chatFormat);
         } catch (IOException e) {
             throw new RuntimeException("Failed to load OLMoE model", e);
         }
@@ -213,6 +221,33 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
      */
     private Boolean getBoolFromMetadata(Map<String, Object> metadata, String key, boolean defaultValue) {
         return metadata.containsKey(key) ? (Boolean) metadata.get(key) : defaultValue;
+    }
+
+    /**
+     * Detects if this is an Instruct model based on metadata.
+     * OLMoE Instruct models should use the Tulu chat template.
+     */
+    private boolean isInstructModel(Map<String, Object> metadata) {
+        // Check model name/identifier for "Instruct" suffix
+        String modelName = (String) metadata.get("general.name");
+        if (modelName != null && modelName.toLowerCase().contains("instruct")) {
+            return true;
+        }
+
+        // Check for fine-tuning related metadata
+        String finetuneType = (String) metadata.get("general.finetune");
+        if (finetuneType != null && finetuneType.toLowerCase().contains("instruct")) {
+            return true;
+        }
+
+        // Check for chat template in metadata (indicates instruction-tuning)
+        String chatTemplate = (String) metadata.get("tokenizer.chat_template");
+        if (chatTemplate != null && !chatTemplate.trim().isEmpty()) {
+            return true;
+        }
+
+        // Default to false for base models
+        return false;
     }
 
     // @formatter:off
