@@ -106,6 +106,13 @@ public final class InferenceCore {
         // normalize and scale
         final float finalss = ss; // for the lambda
 
+        // Debug: Check intermediate values for OLMoE (non-Gemma)
+        if (position < 3 && config.getClass().getSimpleName().contains("Olmoe")) {
+            System.err.printf("[RMSNORM-DEBUG] Position %d: ss=%.6f, finalss=%.6f, inputSum=%.6f%n",
+                            position, ss - rmsNormEps, finalss,
+                            x.reduce(offset, size, 0f, (acc, xi) -> acc + xi));
+        }
+
         if (isGemmaModel) {
             // Add epsilon perturbation for Gemma models to break oscillation cycles
             // Use position-based seed for reproducible but varied perturbation
@@ -2393,6 +2400,13 @@ public final class InferenceCore {
             dim * Float.BYTES
         );
 
+        // Debug: Check token embedding values
+        float sum = 0.0f;
+        for (int i = 0; i < Math.min(5, dim); i++) {
+            sum += state.wrapX.get(i);
+        }
+        System.err.printf("[EMBED-DEBUG] Token %d embedding sum of first 5: %.6f%n", token, sum);
+
         // HYBRID APPROACH: Use TornadoVM for standard layers but CPU for MoE routing
         //
         // The challenge is that TornadoVMMasterPlan is designed for standard transformer
@@ -2406,8 +2420,22 @@ public final class InferenceCore {
 
         // Process all transformer layers
         for (int layer = 0; layer < config.numberOfLayers(); layer++) {
+            // Debug: Check input to layer
+            float layerInputSum = 0.0f;
+            for (int i = 0; i < Math.min(5, dim); i++) {
+                layerInputSum += state.wrapX.get(i);
+            }
+            System.err.printf("[LAYER-DEBUG] Layer %d input sum of first 5: %.6f%n", layer, layerInputSum);
+
             // Use CPU-based MoE processing with TornadoVM state management
             processOlmoeMoELayerHybrid(model, state, layer, position, tornadoVMPlan);
+
+            // Debug: Check output from layer
+            float layerOutputSum = 0.0f;
+            for (int i = 0; i < Math.min(5, dim); i++) {
+                layerOutputSum += state.wrapX.get(i);
+            }
+            System.err.printf("[LAYER-DEBUG] Layer %d output sum of first 5: %.6f%n", layer, layerOutputSum);
         }
 
         // Final RMSNorm and output projection (like standard inference)
@@ -2417,13 +2445,52 @@ public final class InferenceCore {
             finalHidden[i] = state.wrapX.get(i);
         }
 
+        // Debug: Check pre-final processing values
+        float preNormSum = 0.0f;
+        for (int i = 0; i < Math.min(5, dim); i++) {
+            preNormSum += finalHidden[i];
+        }
+        System.err.printf("[FINAL-DEBUG] Pre-norm sum of first 5: %.6f%n", preNormSum);
+
         // Apply final RMSNorm
         FloatTensor finalNorm = convertFloatArrayToTensor(olmoeWeights.rms_final_weight_as_floatArray);
-        rmsnormWithPerturbation(convertArrayToTensor(finalHidden), state.x, finalNorm, 0, dim, config.rmsNormEps(), config, position);
+
+        // Debug: Check RMSNorm weights
+        float weightSum = 0.0f;
+        int weightCount = Math.min(5, (int)olmoeWeights.rms_final_weight_as_floatArray.getSize());
+        for (int i = 0; i < weightCount; i++) {
+            weightSum += olmoeWeights.rms_final_weight_as_floatArray.get(i);
+        }
+        System.err.printf("[RMSNORM-DEBUG] Weight sum of first %d: %.6f, eps=%.1e%n",
+                         weightCount, weightSum, config.rmsNormEps());
+
+        // BUGFIX: Copy finalHidden to state.x directly instead of using tensor conversion
+        // The convertArrayToTensor was causing zero values
+        for (int i = 0; i < dim; i++) {
+            state.x.setFloat(i, finalHidden[i]);
+        }
+
+        // Apply RMSNorm in-place on state.x
+        FloatTensor inputTensor = state.x; // Use state.x directly as both input and output
+        rmsnormWithPerturbation(inputTensor, state.x, finalNorm, 0, dim, config.rmsNormEps(), config, position);
+
+        // Debug: Check post-norm values
+        float postNormSum = 0.0f;
+        for (int i = 0; i < Math.min(5, dim); i++) {
+            postNormSum += state.x.getFloat(i);
+        }
+        System.err.printf("[FINAL-DEBUG] Post-norm sum of first 5: %.6f%n", postNormSum);
 
         // Output projection to get logits - convert HalfFloatArray to FloatTensor
         FloatTensor wclsTensor = convertHalfFloatArrayToTensor(olmoeWeights.wclsHalfFloat);
         wclsTensor.matmul(state.x, state.logits, vocabularySize, dim);
+
+        // Debug: Check raw logits values
+        float logitsSum = 0.0f;
+        for (int i = 0; i < Math.min(5, vocabularySize); i++) {
+            logitsSum += state.logits.getFloat(i);
+        }
+        System.err.printf("[FINAL-DEBUG] Raw logits sum of first 5: %.6f%n", logitsSum);
 
         // Copy logits to wrapLogits for TornadoVM compatibility
         for (int i = 0; i < vocabularySize; i++) {
@@ -2461,9 +2528,55 @@ public final class InferenceCore {
             state.wrapXb.set(i, normInput[i]);
         }
 
-        // 2. Let TornadoVM handle standard attention processing
-        // (This will use the existing TornadoVM attention kernels)
-        // Note: We're not calling the full forward, just using TornadoVM for attention computation
+        // 2. Attention computation (Q, K, V projections and attention)
+        int headDim = dim / config.numberOfHeads();
+        int numHeads = config.numberOfHeads();
+
+        // Query, Key, Value projections
+        float[] queryOutput = new float[dim];
+        float[] keyOutput = new float[dim];
+        float[] valueOutput = new float[dim];
+
+        FloatTensor wqTensor = convertHalfFloatArrayToTensor(olmoeWeights.wqLayered[layer]);
+        FloatTensor wkTensor = convertHalfFloatArrayToTensor(olmoeWeights.wkLayered[layer]);
+        FloatTensor wvTensor = convertHalfFloatArrayToTensor(olmoeWeights.wvLayered[layer]);
+
+        wqTensor.matmul(convertArrayToTensor(normInput), convertArrayToTensor(queryOutput), dim, dim);
+        wkTensor.matmul(convertArrayToTensor(normInput), convertArrayToTensor(keyOutput), dim, dim);
+        wvTensor.matmul(convertArrayToTensor(normInput), convertArrayToTensor(valueOutput), dim, dim);
+
+        // Apply RoPE (Rotary Position Embedding) if needed
+        if (olmoeWeights.freq_cis_realFlat != null && olmoeWeights.freq_cis_imagFlat != null) {
+            // Convert FloatArray to float[] for RoPE computation
+            float[] freq_cis_real = new float[olmoeWeights.freq_cis_realFlat.getSize()];
+            float[] freq_cis_imag = new float[olmoeWeights.freq_cis_imagFlat.getSize()];
+            for (int i = 0; i < freq_cis_real.length; i++) {
+                freq_cis_real[i] = olmoeWeights.freq_cis_realFlat.get(i);
+            }
+            for (int i = 0; i < freq_cis_imag.length; i++) {
+                freq_cis_imag[i] = olmoeWeights.freq_cis_imagFlat.get(i);
+            }
+            applyRoPE(queryOutput, keyOutput, position, headDim, numHeads, freq_cis_real, freq_cis_imag);
+        }
+
+        // Multi-head attention computation
+        float[] attentionOutput = computeMultiHeadAttention(queryOutput, keyOutput, valueOutput,
+                                                          state, layer, position, numHeads, headDim);
+
+        // Attention output projection
+        float[] projectedOutput = new float[dim];
+        FloatTensor woTensor = convertHalfFloatArrayToTensor(olmoeWeights.woLayered[layer]);
+        woTensor.matmul(convertArrayToTensor(attentionOutput), convertArrayToTensor(projectedOutput), dim, dim);
+
+        // Residual connection: add input to attention output
+        for (int i = 0; i < dim; i++) {
+            projectedOutput[i] += input[i];
+        }
+
+        // Copy attention result back to TornadoVM state
+        for (int i = 0; i < dim; i++) {
+            state.wrapX.set(i, projectedOutput[i]);
+        }
 
         // 3. MoE processing (CPU-based for now)
         // FFN norm
@@ -2485,6 +2598,24 @@ public final class InferenceCore {
         int[] selectedExperts = org.beehive.gpullama3.inference.MoEUtils.selectTopKExperts(routerLogits, numActiveExperts);
         float[] expertWeights = org.beehive.gpullama3.inference.MoEUtils.computeExpertWeights(routerLogits, selectedExperts);
 
+        // Debug: Log expert selection details
+        if (layer == 0 || layer == config.numberOfLayers() - 1) {  // Log first and last layer
+            System.err.printf("[MOE-ROUTING] Layer %d: Selected experts: ", layer);
+            for (int i = 0; i < Math.min(3, numActiveExperts); i++) {
+                System.err.printf("%d(%.3f) ", selectedExperts[i], expertWeights[i]);
+            }
+            System.err.println();
+
+            // Check router logits distribution
+            float maxLogit = Float.NEGATIVE_INFINITY;
+            float minLogit = Float.POSITIVE_INFINITY;
+            for (float logit : routerLogits) {
+                maxLogit = Math.max(maxLogit, logit);
+                minLogit = Math.min(minLogit, logit);
+            }
+            System.err.printf("[MOE-ROUTING] Layer %d: Router logits range: [%.3f, %.3f]%n", layer, minLogit, maxLogit);
+        }
+
         // Expert processing and aggregation
         float[] expertOutput = new float[dim];
         for (int i = 0; i < numActiveExperts; i++) {
@@ -2493,6 +2624,18 @@ public final class InferenceCore {
 
             // Process this expert using CPU (TODO: optimize with GPU kernels)
             float[] expertResult = processExpertCPU(ffnNormalized, olmoeWeights, layer, expertId, dim, hiddenDim);
+
+            // Debug: Check expert output magnitude
+            if (layer == 0 && i == 0) {  // First expert of first layer
+                float expertSum = 0.0f;
+                float expertMax = Float.NEGATIVE_INFINITY;
+                for (int j = 0; j < dim; j++) {
+                    expertSum += Math.abs(expertResult[j]);
+                    expertMax = Math.max(expertMax, Math.abs(expertResult[j]));
+                }
+                System.err.printf("[MOE-EXPERT] Layer %d Expert %d: output avg=%.6f, max=%.6f, weight=%.3f%n",
+                                 layer, expertId, expertSum/dim, expertMax, weight);
+            }
 
             // Weighted accumulation
             for (int j = 0; j < dim; j++) {
@@ -2522,6 +2665,12 @@ public final class InferenceCore {
         uk.ac.manchester.tornado.api.types.arrays.FloatArray downWeights = weights.expertDownWeightsArray(layer);
         uk.ac.manchester.tornado.api.types.arrays.FloatArray upWeights = weights.expertUpWeightsArray(layer);
 
+        // Debug: Check if weights are valid
+        if (layer == 0 && expertId < 3) {  // Log first 3 experts of first layer
+            System.err.printf("[MOE-WEIGHTS] Layer %d Expert %d: gate size=%d, down size=%d, up size=%d%n",
+                            layer, expertId, gateWeights.getSize(), downWeights.getSize(), upWeights.getSize());
+        }
+
         // Extract expert-specific weights
         float[] expertGate = new float[hiddenDim * dim];
         float[] expertDown = new float[dim * hiddenDim];
@@ -2531,12 +2680,27 @@ public final class InferenceCore {
         int downOffset = expertId * dim * hiddenDim;
         int upOffset = expertId * hiddenDim * dim;
 
+        // Debug: Check weight magnitude
+        float gateSum = 0.0f, downSum = 0.0f, upSum = 0.0f;
+
         for (int i = 0; i < hiddenDim * dim; i++) {
             expertGate[i] = gateWeights.get(gateOffset + i);
             expertUp[i] = upWeights.get(upOffset + i);
+            if (i < 100) {  // Sample first 100 weights
+                gateSum += Math.abs(expertGate[i]);
+                upSum += Math.abs(expertUp[i]);
+            }
         }
         for (int i = 0; i < dim * hiddenDim; i++) {
             expertDown[i] = downWeights.get(downOffset + i);
+            if (i < 100) {
+                downSum += Math.abs(expertDown[i]);
+            }
+        }
+
+        if (layer == 0 && expertId == 0) {
+            System.err.printf("[MOE-WEIGHTS] Layer 0 Expert 0 weight magnitudes (first 100): gate=%.4f, up=%.4f, down=%.4f%n",
+                            gateSum/100, upSum/100, downSum/100);
         }
 
         // Expert FFN computation: Gate(x) * SiLU(Up(x)) then Down()
@@ -2548,10 +2712,11 @@ public final class InferenceCore {
         // Up projection
         matmulCPU(input, expertUp, upOutput, hiddenDim, dim);
 
-        // SiLU activation and element-wise multiplication
+        // SwiGLU activation: silu(gate) * up
+        // CRITICAL FIX: Apply SiLU to gate, not up!
         for (int i = 0; i < hiddenDim; i++) {
-            float silu = upOutput[i] / (1.0f + (float) Math.exp(-upOutput[i]));
-            gateOutput[i] *= silu;
+            float siluGate = gateOutput[i] / (1.0f + (float) Math.exp(-gateOutput[i]));
+            gateOutput[i] = siluGate * upOutput[i];  // Correct SwiGLU: silu(gate) * up
         }
 
         // Down projection
@@ -3635,6 +3800,113 @@ public final class InferenceCore {
         System.err.printf("[TEXT-EMBED-BATCH-TORNADO] Embedded %d tokens at positions %d-%d%n",
                         promptTokens.size(), startPosition, startPosition + promptTokens.size() - 1);
         return promptTokens.size();
+    }
+
+    /**
+     * Apply Rotary Position Embedding (RoPE) to query and key vectors.
+     */
+    private static void applyRoPE(float[] query, float[] key, int position, int headDim, int numHeads,
+                                float[] freq_cis_real, float[] freq_cis_imag) {
+        // Apply RoPE to each head
+        for (int head = 0; head < numHeads; head++) {
+            int headOffset = head * headDim;
+
+            // Apply RoPE to pairs of dimensions (d/2 pairs)
+            for (int i = 0; i < headDim; i += 2) {
+                if (i + 1 < headDim) {
+                    int freqIndex = position * (headDim / 2) + (i / 2);
+                    if (freqIndex < freq_cis_real.length) {
+                        float cos = freq_cis_real[freqIndex];
+                        float sin = freq_cis_imag[freqIndex];
+
+                        // Apply RoPE to query
+                        float q0 = query[headOffset + i];
+                        float q1 = query[headOffset + i + 1];
+                        query[headOffset + i] = q0 * cos - q1 * sin;
+                        query[headOffset + i + 1] = q0 * sin + q1 * cos;
+
+                        // Apply RoPE to key
+                        float k0 = key[headOffset + i];
+                        float k1 = key[headOffset + i + 1];
+                        key[headOffset + i] = k0 * cos - k1 * sin;
+                        key[headOffset + i + 1] = k0 * sin + k1 * cos;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Compute multi-head attention: Q * K^T -> softmax -> * V
+     */
+    private static float[] computeMultiHeadAttention(float[] query, float[] key, float[] value,
+                                                   OlmoeState state, int layer, int position,
+                                                   int numHeads, int headDim) {
+        int seqLen = position + 1; // Current sequence length
+        float[] output = new float[query.length];
+
+        // For each attention head
+        for (int head = 0; head < numHeads; head++) {
+            int headOffset = head * headDim;
+
+            // Get query for current head
+            float[] currentQuery = new float[headDim];
+            System.arraycopy(query, headOffset, currentQuery, 0, headDim);
+
+            // Compute attention scores with all previous positions (including current)
+            float[] scores = new float[seqLen];
+            float maxScore = Float.NEGATIVE_INFINITY;
+
+            for (int pos = 0; pos <= position; pos++) {
+                float score = 0.0f;
+
+                if (pos == position) {
+                    // Current position - use provided key
+                    for (int i = 0; i < headDim; i++) {
+                        score += currentQuery[i] * key[headOffset + i];
+                    }
+                } else {
+                    // Previous positions - would need to be stored in KV cache
+                    // For now, use a simplified approach (this should be improved)
+                    score = 0.1f; // Placeholder
+                }
+
+                scores[pos] = score / (float) Math.sqrt(headDim); // Scale by sqrt(d_k)
+                maxScore = Math.max(maxScore, scores[pos]);
+            }
+
+            // Apply softmax
+            float sum = 0.0f;
+            for (int pos = 0; pos <= position; pos++) {
+                scores[pos] = (float) Math.exp(scores[pos] - maxScore);
+                sum += scores[pos];
+            }
+            for (int pos = 0; pos <= position; pos++) {
+                scores[pos] /= sum;
+            }
+
+            // Apply attention weights to values
+            float[] headOutput = new float[headDim];
+            for (int pos = 0; pos <= position; pos++) {
+                if (pos == position) {
+                    // Current position - use provided value
+                    for (int i = 0; i < headDim; i++) {
+                        headOutput[i] += scores[pos] * value[headOffset + i];
+                    }
+                } else {
+                    // Previous positions - would use KV cache values
+                    // For now, simplified (this should be improved)
+                    for (int i = 0; i < headDim; i++) {
+                        headOutput[i] += scores[pos] * 0.1f; // Placeholder
+                    }
+                }
+            }
+
+            // Copy head output to final output
+            System.arraycopy(headOutput, 0, output, headOffset, headDim);
+        }
+
+        return output;
     }
 
 }

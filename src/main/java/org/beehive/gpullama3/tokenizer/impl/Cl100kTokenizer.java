@@ -133,30 +133,39 @@ public class Cl100kTokenizer implements Tokenizer {
     }
 
     private List<Integer> encodeBytesToTokens(byte[] bytes) {
-        // Convert bytes to initial token sequence
+        // Convert bytes to initial token sequence (following LlamaTokenizer approach)
         List<Integer> tokens = new ArrayList<>();
         for (byte b : bytes) {
             int byteValue = Byte.toUnsignedInt(b);
-            OptionalInt tokenId = vocabulary.getIndex(String.valueOf((char) byteValue));
+            String charStr = String.valueOf((char) byteValue);
+            OptionalInt tokenId = vocabulary.getIndex(charStr);
             if (tokenId.isPresent()) {
                 tokens.add(tokenId.getAsInt());
             } else {
-                // Fallback to byte value if not in vocabulary
-                tokens.add(byteValue);
+                // Handle unknown character: try fallback strategies similar to LlamaTokenizer
+                // Strategy 1: Use the byte value as string
+                OptionalInt byteTokenId = vocabulary.getIndex(String.valueOf(byteValue));
+                if (byteTokenId.isPresent()) {
+                    tokens.add(byteTokenId.getAsInt());
+                } else {
+                    // Strategy 2: Use unknown token (ID 0) or space token as fallback
+                    OptionalInt spaceToken = vocabulary.getIndex(" ");
+                    tokens.add(spaceToken.orElse(0)); // Use 0 as ultimate fallback
+                }
             }
         }
 
-        // Apply BPE merges
-        while (true) {
+        // Apply BPE merges (following LlamaTokenizer approach)
+        while (tokens.size() >= 2) {
+            // Find the pair with the lowest merge index (highest priority)
             Pair<Integer, Integer> bestPair = null;
-            int bestMergeIndex = -1;
+            int bestMergeIndex = Integer.MAX_VALUE;
 
-            // Find the best merge to apply
             for (int i = 0; i < tokens.size() - 1; i++) {
                 Pair<Integer, Integer> pair = new Pair<>(tokens.get(i), tokens.get(i + 1));
                 if (merges.containsKey(pair)) {
                     int mergeIndex = merges.get(pair);
-                    if (bestPair == null || mergeIndex < bestMergeIndex) {
+                    if (mergeIndex < bestMergeIndex) {
                         bestPair = pair;
                         bestMergeIndex = mergeIndex;
                     }

@@ -17,7 +17,7 @@ import org.beehive.gpullama3.model.format.ChatFormat;
 import org.beehive.gpullama3.model.format.ChatFormat.ChatTokens;
 import org.beehive.gpullama3.model.olmoe.Olmoe;
 import org.beehive.gpullama3.model.olmoe.OlmoeConfiguration;
-import org.beehive.gpullama3.tokenizer.impl.Cl100kTokenizer;
+import org.beehive.gpullama3.tokenizer.impl.GptNeoXTokenizer;
 import org.beehive.gpullama3.tokenizer.impl.Tokenizer;
 import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
 import org.beehive.gpullama3.model.loader.batch.BatchCapableModelLoader;
@@ -108,8 +108,8 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             // Load OLMoE-specific vocabulary
             Vocabulary vocabulary = loadOlmoeVocabulary(metadata);
             
-            // Create tokenizer - OLMoE uses cl100k_base tokenizer (same as GPT-3.5/GPT-4)
-            Tokenizer tokenizer = new Cl100kTokenizer(metadata, vocabulary);
+            // Create tokenizer - OLMoE uses allenai/gpt-neox-olmo-dolma-v1_5 (GPT-NeoX style)
+            Tokenizer tokenizer = new GptNeoXTokenizer(metadata, vocabulary);
 
             // Get context length from metadata
             int modelContextLength = getContextLength(metadata);
