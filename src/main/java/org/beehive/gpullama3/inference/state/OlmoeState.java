@@ -196,5 +196,27 @@ public class OlmoeState extends State {
         
         return totalLoss * config.getRouterAuxLossCoef();
     }
-    
+
+    /**
+     * Adds auxiliary losses for a specific layer during MoE routing.
+     *
+     * @param layer Layer index
+     * @param loadBalancingLoss Load balancing auxiliary loss value
+     * @param routerZLoss Router z-loss value
+     */
+    public void addAuxiliaryLoss(int layer, float loadBalancingLoss, float routerZLoss) {
+        // During inference, we compute but don't use auxiliary losses
+        // They would be used during training to prevent router collapse
+        float combinedLoss = loadBalancingLoss * 0.01f + routerZLoss * 0.001f; // OLMoE coefficients
+
+        // Store auxiliary loss for monitoring (during inference, not used for training)
+        // During training, these losses would be added to the main loss function
+
+        // Log auxiliary loss values for monitoring router health
+        if (layer == 0) { // Log only for first layer to avoid spam
+            System.err.printf("[MOE-AUX-LOSS] Layer %d: LoadBalance=%.6f, RouterZ=%.6f, Combined=%.6f%n",
+                             layer, loadBalancingLoss, routerZLoss, combinedLoss);
+        }
+    }
+
 }

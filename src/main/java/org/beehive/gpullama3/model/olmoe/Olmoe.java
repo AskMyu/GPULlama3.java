@@ -53,28 +53,62 @@ public class Olmoe extends AbstractModel {
     @Override
     public State createNewState() {
         State state = new OlmoeState(configuration(), -1);
-        // Initialize with appropriate start token if available
-        if (chatFormat != null && chatFormat.chatTokens() != null && 
-            chatFormat.chatTokens().tStartHeader() != null) {
+
+        // OLMOE FIX: Set proper BOS token to avoid Token 0 cascade failure
+        // OLMoE uses GPT-NeoX tokenizer where <|endoftext|> (50279) is the BOS token
+        if (tokenizer.getSpecialTokens().containsKey("<|endoftext|>")) {
+            state.latestToken = tokenizer.getSpecialTokens().get("<|endoftext|>");
+            System.err.printf("[OLMOE-STATE] Using BOS token: %d (<|endoftext|>)%n", state.latestToken);
+        } else if (chatFormat != null && chatFormat.chatTokens() != null &&
+                   chatFormat.chatTokens().tStartHeader() != null) {
             Integer startToken = tokenizer.getSpecialTokens().get(chatFormat.chatTokens().tStartHeader());
             if (startToken != null) {
                 state.latestToken = startToken;
+                System.err.printf("[OLMOE-STATE] Using chat format token: %d%n", state.latestToken);
             }
+        } else {
+            // Fallback: Use token 1 instead of dangerous token 0
+            state.latestToken = 1;
+            System.err.printf("[OLMOE-STATE] Using fallback token 1 (avoiding token 0)%n");
         }
+
+        // Safety check to prevent Token 0 cascade failure
+        if (state.latestToken == 0) {
+            System.err.println("[OLMOE-STATE] CRITICAL: Token 0 detected, forcing to proper BOS token");
+            state.latestToken = tokenizer.getSpecialTokens().getOrDefault("<|endoftext|>", 1);
+        }
+
         return state;
     }
 
     @Override
     public State createNewState(int batchsize) {
         State state = new OlmoeState(configuration(), batchsize);
-        // Initialize with appropriate start token if available
-        if (chatFormat != null && chatFormat.chatTokens() != null && 
-            chatFormat.chatTokens().tStartHeader() != null) {
+
+        // OLMOE FIX: Set proper BOS token to avoid Token 0 cascade failure
+        // OLMoE uses GPT-NeoX tokenizer where <|endoftext|> (50279) is the BOS token
+        if (tokenizer.getSpecialTokens().containsKey("<|endoftext|>")) {
+            state.latestToken = tokenizer.getSpecialTokens().get("<|endoftext|>");
+            System.err.printf("[OLMOE-STATE-BATCH] Using BOS token: %d (<|endoftext|>)%n", state.latestToken);
+        } else if (chatFormat != null && chatFormat.chatTokens() != null &&
+                   chatFormat.chatTokens().tStartHeader() != null) {
             Integer startToken = tokenizer.getSpecialTokens().get(chatFormat.chatTokens().tStartHeader());
             if (startToken != null) {
                 state.latestToken = startToken;
+                System.err.printf("[OLMOE-STATE-BATCH] Using chat format token: %d%n", state.latestToken);
             }
+        } else {
+            // Fallback: Use token 1 instead of dangerous token 0
+            state.latestToken = 1;
+            System.err.printf("[OLMOE-STATE-BATCH] Using fallback token 1 (avoiding token 0)%n");
         }
+
+        // Safety check to prevent Token 0 cascade failure
+        if (state.latestToken == 0) {
+            System.err.println("[OLMOE-STATE-BATCH] CRITICAL: Token 0 detected, forcing to proper BOS token");
+            state.latestToken = tokenizer.getSpecialTokens().getOrDefault("<|endoftext|>", 1);
+        }
+
         return state;
     }
 

@@ -108,6 +108,35 @@ public final class MoEUtils {
             throw new IllegalArgumentException("Input dimension mismatch: expected " + dim + ", got " + input.length);
         }
 
+        // CRITICAL DEBUG: Verify weight tensor access patterns and dimensions
+        System.err.printf("[EXPERT-FFN-DEBUG] Processing expert FFN: dim=%d, hiddenDim=%d%n", dim, hiddenDim);
+        System.err.printf("[EXPERT-FFN-DEBUG] Weight sizes: gate=%d, up=%d, down=%d%n",
+                         gateWeight.length, upWeight.length, downWeight.length);
+
+        // Expected sizes: gate[hiddenDim*dim], up[hiddenDim*dim], down[dim*hiddenDim]
+        int expectedGateUp = hiddenDim * dim;
+        int expectedDown = dim * hiddenDim;
+        if (gateWeight.length != expectedGateUp || upWeight.length != expectedGateUp || downWeight.length != expectedDown) {
+            System.err.printf("[EXPERT-FFN-ERROR] Weight size mismatch! Expected gate/up=%d, down=%d%n",
+                             expectedGateUp, expectedDown);
+        }
+
+        // Sample first few weights for debugging (only for first few calls)
+        if (gateWeight.length > 0 && upWeight.length > 0 && downWeight.length > 0) {
+            System.err.printf("[EXPERT-FFN-SAMPLE] Gate[0:3]: %.6f, %.6f, %.6f%n",
+                             gateWeight[0],
+                             gateWeight.length > 1 ? gateWeight[1] : 0.0f,
+                             gateWeight.length > 2 ? gateWeight[2] : 0.0f);
+            System.err.printf("[EXPERT-FFN-SAMPLE] Up[0:3]: %.6f, %.6f, %.6f%n",
+                             upWeight[0],
+                             upWeight.length > 1 ? upWeight[1] : 0.0f,
+                             upWeight.length > 2 ? upWeight[2] : 0.0f);
+            System.err.printf("[EXPERT-FFN-SAMPLE] Down[0:3]: %.6f, %.6f, %.6f%n",
+                             downWeight[0],
+                             downWeight.length > 1 ? downWeight[1] : 0.0f,
+                             downWeight.length > 2 ? downWeight[2] : 0.0f);
+        }
+
         // Gate projection: gate = gateWeight @ input
         float[] gate = new float[hiddenDim];
         for (int h = 0; h < hiddenDim; h++) {
@@ -129,12 +158,27 @@ public final class MoEUtils {
         }
 
         // SwiGLU activation: silu(gate) * up
+        // More numerically stable SiLU computation matching llama.cpp precision
         float[] intermediate = new float[hiddenDim];
         for (int h = 0; h < hiddenDim; h++) {
-            // SiLU (Swish) activation: x / (1 + exp(-x))
             float gateValue = gate[h];
-            float silu = gateValue / (1.0f + (float) Math.exp(-gateValue));
-            intermediate[h] = silu * up[h];
+            float upValue = up[h];
+
+            // SiLU (Swish) activation: x * sigmoid(x) = x / (1 + exp(-x))
+            // Use numerically stable computation to match llama.cpp precision
+            float sigmoid;
+            if (gateValue > 0) {
+                // For positive values: sigmoid(x) = 1 / (1 + exp(-x))
+                sigmoid = 1.0f / (1.0f + (float) Math.exp(-gateValue));
+            } else {
+                // For negative values: sigmoid(x) = exp(x) / (1 + exp(x))
+                // This is more numerically stable for negative inputs
+                float expX = (float) Math.exp(gateValue);
+                sigmoid = expX / (1.0f + expX);
+            }
+
+            // SwiGLU: silu(gate) * up = gate * sigmoid(gate) * up
+            intermediate[h] = gateValue * sigmoid * upValue;
         }
 
         // Down projection: output = downWeight @ intermediate
@@ -166,6 +210,33 @@ public final class MoEUtils {
             throw new IllegalArgumentException("Expert outputs and weights length mismatch");
         }
 
+        // CRITICAL DEBUG: Verify expert weights and outputs before aggregation
+        System.err.printf("[AGGREGATION-DEBUG] Aggregating %d experts for dim=%d%n", expertOutputs.length, dim);
+
+        float weightSum = 0.0f;
+        float[] outputMagnitudes = new float[expertOutputs.length];
+        for (int i = 0; i < expertOutputs.length; i++) {
+            weightSum += expertWeights[i];
+            // Calculate L2 norm of each expert output
+            float magnitude = 0.0f;
+            for (int d = 0; d < Math.min(dim, expertOutputs[i].length); d++) {
+                magnitude += expertOutputs[i][d] * expertOutputs[i][d];
+            }
+            outputMagnitudes[i] = (float) Math.sqrt(magnitude);
+        }
+
+        System.err.printf("[AGGREGATION-DEBUG] Weight sum: %.6f (should be ~1.0)%n", weightSum);
+        System.err.printf("[AGGREGATION-DEBUG] Expert weights: ");
+        for (int i = 0; i < expertWeights.length; i++) {
+            System.err.printf("%.4f ", expertWeights[i]);
+        }
+        System.err.println();
+        System.err.printf("[AGGREGATION-DEBUG] Expert output magnitudes: ");
+        for (int i = 0; i < outputMagnitudes.length; i++) {
+            System.err.printf("%.4f ", outputMagnitudes[i]);
+        }
+        System.err.println();
+
         float[] aggregatedOutput = new float[dim];
 
         for (int i = 0; i < expertOutputs.length; i++) {
@@ -180,6 +251,14 @@ public final class MoEUtils {
                 aggregatedOutput[d] += weight * output[d];
             }
         }
+
+        // DEBUG: Calculate final aggregated output magnitude
+        float aggregatedMagnitude = 0.0f;
+        for (int d = 0; d < dim; d++) {
+            aggregatedMagnitude += aggregatedOutput[d] * aggregatedOutput[d];
+        }
+        aggregatedMagnitude = (float) Math.sqrt(aggregatedMagnitude);
+        System.err.printf("[AGGREGATION-DEBUG] Final aggregated magnitude: %.6f%n", aggregatedMagnitude);
 
         return aggregatedOutput;
     }
@@ -248,6 +327,89 @@ public final class MoEUtils {
         }
 
         return routerLogits;
+    }
+
+    /**
+     * Computes load balancing auxiliary loss to prevent router collapse.
+     *
+     * Load balancing loss encourages uniform expert usage by penalizing uneven distribution.
+     * Formula: L_balance = coefficient * sum(f_i * P_i) where:
+     * - f_i = fraction of tokens assigned to expert i
+     * - P_i = probability assigned to expert i
+     *
+     * @param routerLogits Raw router logits [numExperts]
+     * @param selectedExperts Indices of selected experts [numActiveExperts]
+     * @param numExperts Total number of experts
+     * @param numActiveExperts Number of active experts per token
+     * @return Load balancing loss value
+     */
+    public static float computeLoadBalancingLoss(float[] routerLogits, int[] selectedExperts,
+                                               int numExperts, int numActiveExperts) {
+        // Convert logits to probabilities using softmax
+        float[] probs = softmax(routerLogits);
+
+        // Compute fraction of tokens assigned to each expert (f_i)
+        float[] fractions = new float[numExperts];
+        for (int expertId : selectedExperts) {
+            fractions[expertId] += 1.0f / numActiveExperts; // Each selected expert gets equal fraction
+        }
+
+        // Compute load balancing loss: sum(f_i * P_i)
+        float loss = 0.0f;
+        for (int i = 0; i < numExperts; i++) {
+            loss += fractions[i] * probs[i];
+        }
+
+        // Scale by number of experts (standard practice)
+        return loss * numExperts;
+    }
+
+    /**
+     * Computes router z-loss to prevent extreme logit values.
+     *
+     * Router z-loss penalizes overly confident routing decisions by constraining logit magnitudes.
+     * Formula: L_z = coefficient * sum(logits^2) / numExperts
+     *
+     * @param routerLogits Raw router logits [numExperts]
+     * @return Router z-loss value
+     */
+    public static float computeRouterZLoss(float[] routerLogits) {
+        float sumSquares = 0.0f;
+        for (float logit : routerLogits) {
+            sumSquares += logit * logit;
+        }
+
+        // Normalize by number of experts
+        return sumSquares / routerLogits.length;
+    }
+
+    /**
+     * Computes softmax over router logits for probability distribution.
+     *
+     * @param logits Input logits [numExperts]
+     * @return Softmax probabilities [numExperts]
+     */
+    private static float[] softmax(float[] logits) {
+        // Find max for numerical stability
+        float maxLogit = Float.NEGATIVE_INFINITY;
+        for (float logit : logits) {
+            maxLogit = Math.max(maxLogit, logit);
+        }
+
+        // Compute exp(logit - max) and sum
+        float[] probs = new float[logits.length];
+        float sum = 0.0f;
+        for (int i = 0; i < logits.length; i++) {
+            probs[i] = (float) Math.exp(logits[i] - maxLogit);
+            sum += probs[i];
+        }
+
+        // Normalize to get probabilities
+        for (int i = 0; i < probs.length; i++) {
+            probs[i] /= sum;
+        }
+
+        return probs;
     }
 
     /**

@@ -801,9 +801,9 @@ public class TornadoVMMasterPlan {
      * Special weight copying for MoE models with limited GPU memory
      */
     private void forceCopyInReadOnlyDataLayeredMoE() {
-        System.err.println("[TORNADO-COPY-MOE] Special MoE weight copying mode activated");
-        System.err.println("[TORNADO-COPY-MOE] This mode skips expert tensor copying to conserve GPU memory");
-        System.err.println("[TORNADO-COPY-MOE] Expert tensors will be loaded on-demand during inference");
+        System.err.println("[TORNADO-COPY-MOE] Selective Expert Loading mode activated");
+        System.err.println("[TORNADO-COPY-MOE] Expert tensors will be loaded on-demand with intelligent caching");
+        System.err.println("[TORNADO-COPY-MOE] Loading only non-expert weights to GPU, experts cached as needed");
 
         // Initialize state
         state.wrapX.init(0.0f);

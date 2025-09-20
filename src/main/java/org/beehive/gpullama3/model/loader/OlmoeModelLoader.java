@@ -641,6 +641,17 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             w3Placeholder[i] = new HalfFloatArray(1);
         }
 
+        // Collect source tensors for selective expert loading
+        FloatTensor[] sourceExpertGateWeights = new FloatTensor[numLayers];
+        FloatTensor[] sourceExpertDownWeights = new FloatTensor[numLayers];
+        FloatTensor[] sourceExpertUpWeights = new FloatTensor[numLayers];
+
+        for (int i = 0; i < numLayers; i++) {
+            sourceExpertGateWeights[i] = loadedTensors.get("blk." + i + ".ffn_gate_exps.weight");
+            sourceExpertDownWeights[i] = loadedTensors.get("blk." + i + ".ffn_down_exps.weight");
+            sourceExpertUpWeights[i] = loadedTensors.get("blk." + i + ".ffn_up_exps.weight");
+        }
+
         return new OlmoeTornadoWeights(
                 convertToFloatArray(tokenEmbeddings),  // tokenEmbeddingTable
                 attentionNorms,                        // rms_att_weightLayered
@@ -660,7 +671,10 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 routerWeights,                         // MoE-specific: routerWeights
                 expertGateWeights,                     // MoE-specific: expertGateWeights
                 expertDownWeights,                     // MoE-specific: expertDownWeights
-                expertUpWeights                        // MoE-specific: expertUpWeights
+                expertUpWeights,                       // MoE-specific: expertUpWeights
+                sourceExpertGateWeights,               // NEW: Source tensors for selective loading
+                sourceExpertDownWeights,               // NEW: Source tensors for selective loading
+                sourceExpertUpWeights                  // NEW: Source tensors for selective loading
         );
     }
 

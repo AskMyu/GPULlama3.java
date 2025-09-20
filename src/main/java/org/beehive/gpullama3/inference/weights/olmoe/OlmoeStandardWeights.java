@@ -132,6 +132,10 @@ public class OlmoeStandardWeights implements Weights {
     /**
      * Extracts gate weights for a specific expert.
      *
+     * GGUF storage format: Tensors are stored as [hidden_dim * num_experts, dim]
+     * Expert i weights start at offset: i * hidden_dim
+     * Each row j (0 to hidden_dim-1) for expert i is at: (i * hidden_dim + j) * dim
+     *
      * @param layer Layer index
      * @param expertId Expert index (0 to numExperts-1)
      * @param numExperts Total number of experts
@@ -143,9 +147,17 @@ public class OlmoeStandardWeights implements Weights {
         FloatTensor allGateWeights = expertGateWeights[layer];
         float[] expertWeights = new float[hiddenDim * dim];
 
-        int expertOffset = expertId * hiddenDim * dim;
-        for (int i = 0; i < hiddenDim * dim; i++) {
-            expertWeights[i] = allGateWeights.getFloat(expertOffset + i);
+        // GGUF format: tensor shape is [hidden_dim * num_experts, dim]
+        // Expert expertId weights are at rows [expertId * hiddenDim : (expertId + 1) * hiddenDim]
+        int expertStartRow = expertId * hiddenDim;
+
+        for (int row = 0; row < hiddenDim; row++) {
+            int tensorRow = expertStartRow + row;
+            for (int col = 0; col < dim; col++) {
+                int tensorIndex = tensorRow * dim + col;
+                int expertIndex = row * dim + col;
+                expertWeights[expertIndex] = allGateWeights.getFloat(tensorIndex);
+            }
         }
 
         return expertWeights;
@@ -153,6 +165,10 @@ public class OlmoeStandardWeights implements Weights {
 
     /**
      * Extracts down weights for a specific expert.
+     *
+     * GGUF storage format: Tensors are stored as [dim * num_experts, hidden_dim]
+     * Expert i weights start at offset: i * dim
+     * Each row j (0 to dim-1) for expert i is at: (i * dim + j) * hidden_dim
      *
      * @param layer Layer index
      * @param expertId Expert index (0 to numExperts-1)
@@ -165,9 +181,17 @@ public class OlmoeStandardWeights implements Weights {
         FloatTensor allDownWeights = expertDownWeights[layer];
         float[] expertWeights = new float[dim * hiddenDim];
 
-        int expertOffset = expertId * dim * hiddenDim;
-        for (int i = 0; i < dim * hiddenDim; i++) {
-            expertWeights[i] = allDownWeights.getFloat(expertOffset + i);
+        // GGUF format: tensor shape is [dim * num_experts, hidden_dim]
+        // Expert expertId weights are at rows [expertId * dim : (expertId + 1) * dim]
+        int expertStartRow = expertId * dim;
+
+        for (int row = 0; row < dim; row++) {
+            int tensorRow = expertStartRow + row;
+            for (int col = 0; col < hiddenDim; col++) {
+                int tensorIndex = tensorRow * hiddenDim + col;
+                int expertIndex = row * hiddenDim + col;
+                expertWeights[expertIndex] = allDownWeights.getFloat(tensorIndex);
+            }
         }
 
         return expertWeights;
@@ -175,6 +199,10 @@ public class OlmoeStandardWeights implements Weights {
 
     /**
      * Extracts up weights for a specific expert.
+     *
+     * GGUF storage format: Tensors are stored as [hidden_dim * num_experts, dim]
+     * Expert i weights start at offset: i * hidden_dim
+     * Each row j (0 to hidden_dim-1) for expert i is at: (i * hidden_dim + j) * dim
      *
      * @param layer Layer index
      * @param expertId Expert index (0 to numExperts-1)
@@ -187,9 +215,17 @@ public class OlmoeStandardWeights implements Weights {
         FloatTensor allUpWeights = expertUpWeights[layer];
         float[] expertWeights = new float[hiddenDim * dim];
 
-        int expertOffset = expertId * hiddenDim * dim;
-        for (int i = 0; i < hiddenDim * dim; i++) {
-            expertWeights[i] = allUpWeights.getFloat(expertOffset + i);
+        // GGUF format: tensor shape is [hidden_dim * num_experts, dim]
+        // Expert expertId weights are at rows [expertId * hiddenDim : (expertId + 1) * hiddenDim]
+        int expertStartRow = expertId * hiddenDim;
+
+        for (int row = 0; row < hiddenDim; row++) {
+            int tensorRow = expertStartRow + row;
+            for (int col = 0; col < dim; col++) {
+                int tensorIndex = tensorRow * dim + col;
+                int expertIndex = row * dim + col;
+                expertWeights[expertIndex] = allUpWeights.getFloat(tensorIndex);
+            }
         }
 
         return expertWeights;

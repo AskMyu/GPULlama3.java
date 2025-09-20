@@ -311,20 +311,16 @@ public class GptNeoXTokenizer implements Tokenizer {
     }
 
     private String decodeGPT2Bytes(String text) {
+        // GPT-NeoX may not need the same byte decoding as GPT-2
+        // Only handle the space character mapping, leave other characters as-is
         StringBuilder decoded = new StringBuilder();
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
-            // Handle GPT-2 byte encoding
             if (c == 'Ġ') {
-                // 'Ġ' (U+0120) represents space
+                // 'Ġ' (U+0120) represents space in both GPT-2 and GPT-NeoX
                 decoded.append(' ');
-            } else if (c >= 0x100 && c <= 0x1FF) {
-                // Characters in range U+0100-U+01FF map back to bytes
-                // This is the GPT-2 encoding for non-printable/special bytes
-                int byteValue = c - 0x100;
-                decoded.append((char) byteValue);
             } else {
-                // Regular characters stay as-is
+                // For GPT-NeoX, keep other characters as-is to preserve UTF-8
                 decoded.append(c);
             }
         }

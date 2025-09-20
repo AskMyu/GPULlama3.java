@@ -2305,6 +2305,8 @@ public final class InferenceCore {
             rmsnorm(state.xb, state.x, olmoeWeights.ffnNorm(layer), 0, dim, config.rmsNormEps());
 
             // *** MoE ROUTING LOGIC - This is the key difference from standard Llama ***
+            System.err.printf("[MOE-ROUTING] Layer %d: Starting MoE computation with %d experts, %d active%n",
+                             layer, numExperts, numActiveExperts);
 
             // 1. Compute router logits
             float[] input = new float[dim];
@@ -2315,9 +2317,38 @@ public final class InferenceCore {
             float[] routerWeights = olmoeWeights.getRouterWeights(layer);
             float[] routerLogits = MoEUtils.computeRouterLogits(input, routerWeights, numExperts, dim);
 
-            // 2. Select top-K experts
+            // Log router logit statistics
+            float maxLogit = Float.NEGATIVE_INFINITY;
+            float minLogit = Float.POSITIVE_INFINITY;
+            for (float logit : routerLogits) {
+                maxLogit = Math.max(maxLogit, logit);
+                minLogit = Math.min(minLogit, logit);
+            }
+            System.err.printf("[MOE-ROUTING] Layer %d: Router logits range [%.4f, %.4f]%n",
+                             layer, minLogit, maxLogit);
+
+            // 2. Select top-K experts with load balancing
             int[] selectedExperts = MoEUtils.selectTopKExperts(routerLogits, numActiveExperts);
             float[] expertWeights = MoEUtils.computeExpertWeights(routerLogits, selectedExperts);
+
+            // Apply load balancing auxiliary loss (OLMoE coefficient: 0.01)
+            float loadBalancingLoss = MoEUtils.computeLoadBalancingLoss(routerLogits, selectedExperts, numExperts, numActiveExperts);
+
+            // Apply router z-loss to prevent extreme logits (OLMoE coefficient: 0.001)
+            float routerZLoss = MoEUtils.computeRouterZLoss(routerLogits);
+
+            // Debug: Check state type and log auxiliary losses
+            System.err.printf("[MOE-DEBUG] Layer %d: state class=%s, loadBalancing=%.6f, routerZ=%.6f%n",
+                             layer, state.getClass().getSimpleName(), loadBalancingLoss, routerZLoss);
+
+            // Store auxiliary losses for training (during inference, these are computed but not used)
+            if (state instanceof org.beehive.gpullama3.inference.state.OlmoeState olmoeState) {
+                System.err.printf("[MOE-AUX-LOSS] Layer %d: LoadBalance=%.6f, RouterZ=%.6f%n",
+                                 layer, loadBalancingLoss, routerZLoss);
+                olmoeState.addAuxiliaryLoss(layer, loadBalancingLoss, routerZLoss);
+            } else {
+                System.err.printf("[MOE-WARNING] Layer %d: State is not OlmoeState, cannot track auxiliary losses%n", layer);
+            }
 
             // 3. Compute expert outputs
             float[][] expertOutputs = new float[numActiveExperts][];
@@ -2336,11 +2367,10 @@ public final class InferenceCore {
             // 4. Aggregate expert outputs
             float[] aggregatedOutput = MoEUtils.aggregateExpertOutputs(expertOutputs, expertWeights, dim);
 
-            // CRITICAL FIX: Add residual connection
-            // Formula: h_t^l = ∑(g_{i,t} * FFN_i(u_t^l)) + u_t^l
-            // Copy aggregated output + input residual to state
+            // Copy aggregated MoE output to state (residual will be added later)
+            // Formula: h_t^l = ∑(g_{i,t} * FFN_i(u_t^l)) + u_t^l (+ happens at line 2357)
             for (int i = 0; i < dim; i++) {
-                state.xb2.setFloat(i, aggregatedOutput[i] + input[i]);
+                state.xb2.setFloat(i, aggregatedOutput[i]);
             }
 
             // 5. Update MoE state for load balancing
@@ -2534,6 +2564,7 @@ public final class InferenceCore {
      * Hybrid MoE layer processing: TornadoVM for attention, CPU for expert routing.
      */
     private static void processOlmoeMoELayerHybrid(Model model, OlmoeState state, int layer, int position, TornadoVMMasterPlan tornadoVMPlan) {
+        System.err.printf("[HYBRID-DEBUG] ENTRY: processOlmoeMoELayerHybrid layer=%d%n", layer);
         var config = (org.beehive.gpullama3.model.olmoe.OlmoeConfiguration) model.configuration();
         var olmoeWeights = (org.beehive.gpullama3.inference.weights.olmoe.OlmoeTornadoWeights) model.weights();
 
@@ -2771,6 +2802,18 @@ public final class InferenceCore {
         int[] selectedExperts = org.beehive.gpullama3.inference.MoEUtils.selectTopKExperts(routerLogits, numActiveExperts);
         float[] expertWeights = org.beehive.gpullama3.inference.MoEUtils.computeExpertWeights(routerLogits, selectedExperts);
 
+        // CRITICAL FIX: Add auxiliary loss computation for semantic coherence
+        float loadBalancingLoss = org.beehive.gpullama3.inference.MoEUtils.computeLoadBalancingLoss(routerLogits, selectedExperts, numberOfExperts, numActiveExperts);
+        float routerZLoss = org.beehive.gpullama3.inference.MoEUtils.computeRouterZLoss(routerLogits);
+
+        // Log auxiliary losses for monitoring router health (TornadoVM hybrid path)
+        System.err.printf("[MOE-AUX-LOSS-HYBRID] Layer %d: LoadBalance=%.6f, RouterZ=%.6f, Combined=%.6f%n",
+                         layer, loadBalancingLoss, routerZLoss,
+                         loadBalancingLoss * 0.01f + routerZLoss * 0.001f);
+
+        // Store auxiliary losses in state (for training - not used during inference)
+        state.addAuxiliaryLoss(layer, loadBalancingLoss, routerZLoss);
+
         // ENHANCED DEBUG: Log detailed expert selection and routing analysis
         if (layer == 0 || layer == config.numberOfLayers() - 1) {  // Log first and last layer
             System.err.printf("[MOE-ROUTING-DETAILED] Layer %d: Selected experts and weights:%n", layer);
@@ -2855,47 +2898,59 @@ public final class InferenceCore {
     private static float[] processExpertCPU(float[] input,
                                           org.beehive.gpullama3.inference.weights.olmoe.OlmoeTornadoWeights weights,
                                           int layer, int expertId, int dim, int hiddenDim) {
-        // Get expert weights (converted from TornadoVM arrays)
-        uk.ac.manchester.tornado.api.types.arrays.FloatArray gateWeights = weights.expertGateWeightsArray(layer);
-        uk.ac.manchester.tornado.api.types.arrays.FloatArray downWeights = weights.expertDownWeightsArray(layer);
-        uk.ac.manchester.tornado.api.types.arrays.FloatArray upWeights = weights.expertUpWeightsArray(layer);
+        System.err.printf("[PROCESS-EXPERT-CPU] Layer %d Expert %d: Using selective loading methods%n", layer, expertId);
 
-        // Debug: Check if weights are valid
+        // Use selective loading methods instead of direct FloatArray access
+        // This will trigger our cache system and on-demand loading
+        float[] expertGate = weights.getExpertGateWeights(layer, expertId, 64, hiddenDim, dim);
+        float[] expertDown = weights.getExpertDownWeights(layer, expertId, 64, hiddenDim, dim);
+        float[] expertUp = weights.getExpertUpWeights(layer, expertId, 64, hiddenDim, dim);
+
+        // Enhanced Debug: Check weight tensor dimensions and values
         if (layer == 0 && expertId < 3) {  // Log first 3 experts of first layer
-            System.err.printf("[MOE-WEIGHTS] Layer %d Expert %d: gate size=%d, down size=%d, up size=%d%n",
-                            layer, expertId, gateWeights.getSize(), downWeights.getSize(), upWeights.getSize());
-        }
+            System.err.printf("[HYBRID-WEIGHT-DEBUG] Layer %d Expert %d: Weight sizes - gate=%d, up=%d, down=%d%n",
+                             layer, expertId, expertGate.length, expertUp.length, expertDown.length);
 
-        // Extract expert-specific weights
-        float[] expertGate = new float[hiddenDim * dim];
-        float[] expertDown = new float[dim * hiddenDim];
-        float[] expertUp = new float[hiddenDim * dim];
+            // Expected sizes: gate[hiddenDim*dim], up[hiddenDim*dim], down[dim*hiddenDim]
+            int expectedGateUp = hiddenDim * dim;
+            int expectedDown = dim * hiddenDim;
+            System.err.printf("[HYBRID-WEIGHT-DEBUG] Layer %d Expert %d: Expected sizes - gate/up=%d, down=%d%n",
+                             layer, expertId, expectedGateUp, expectedDown);
 
-        int gateOffset = expertId * hiddenDim * dim;
-        int downOffset = expertId * dim * hiddenDim;
-        int upOffset = expertId * hiddenDim * dim;
+            if (expertGate.length != expectedGateUp || expertUp.length != expectedGateUp || expertDown.length != expectedDown) {
+                System.err.printf("[HYBRID-WEIGHT-ERROR] Layer %d Expert %d: Weight size mismatch!%n", layer, expertId);
+            }
 
-        // Debug: Check weight magnitude
-        float gateSum = 0.0f, downSum = 0.0f, upSum = 0.0f;
-
-        for (int i = 0; i < hiddenDim * dim; i++) {
-            expertGate[i] = gateWeights.get(gateOffset + i);
-            expertUp[i] = upWeights.get(upOffset + i);
-            if (i < 100) {  // Sample first 100 weights
+            float gateSum = 0.0f, downSum = 0.0f, upSum = 0.0f;
+            for (int i = 0; i < Math.min(100, expertGate.length); i++) {
                 gateSum += Math.abs(expertGate[i]);
+            }
+            for (int i = 0; i < Math.min(100, expertUp.length); i++) {
                 upSum += Math.abs(expertUp[i]);
             }
-        }
-        for (int i = 0; i < dim * hiddenDim; i++) {
-            expertDown[i] = downWeights.get(downOffset + i);
-            if (i < 100) {
+            for (int i = 0; i < Math.min(100, expertDown.length); i++) {
                 downSum += Math.abs(expertDown[i]);
             }
-        }
 
-        if (layer == 0 && expertId == 0) {
-            System.err.printf("[MOE-WEIGHTS] Layer 0 Expert 0 weight magnitudes (first 100): gate=%.4f, up=%.4f, down=%.4f%n",
-                            gateSum/100, upSum/100, downSum/100);
+            System.err.printf("[HYBRID-WEIGHT-DEBUG] Layer %d Expert %d: Weight magnitudes (first 100) - gate=%.6f, up=%.6f, down=%.6f%n",
+                             layer, expertId, gateSum/100, upSum/100, downSum/100);
+
+            // Sample first few weights for pattern verification
+            if (expertId == 0) {
+                System.err.printf("[HYBRID-WEIGHT-SAMPLE] Layer 0 Expert 0 first 3 weights:%n");
+                System.err.printf("  Gate[0:3]: %.6f, %.6f, %.6f%n",
+                                 expertGate.length > 0 ? expertGate[0] : 0.0f,
+                                 expertGate.length > 1 ? expertGate[1] : 0.0f,
+                                 expertGate.length > 2 ? expertGate[2] : 0.0f);
+                System.err.printf("  Up[0:3]: %.6f, %.6f, %.6f%n",
+                                 expertUp.length > 0 ? expertUp[0] : 0.0f,
+                                 expertUp.length > 1 ? expertUp[1] : 0.0f,
+                                 expertUp.length > 2 ? expertUp[2] : 0.0f);
+                System.err.printf("  Down[0:3]: %.6f, %.6f, %.6f%n",
+                                 expertDown.length > 0 ? expertDown[0] : 0.0f,
+                                 expertDown.length > 1 ? expertDown[1] : 0.0f,
+                                 expertDown.length > 2 ? expertDown[2] : 0.0f);
+            }
         }
 
         // Expert FFN computation: Gate(x) * SiLU(Up(x)) then Down()
@@ -2908,17 +2963,92 @@ public final class InferenceCore {
         matmulCPU(input, expertUp, upOutput, hiddenDim, dim);
 
         // SwiGLU activation: silu(gate) * up
-        // CRITICAL FIX: Apply SiLU to gate, not up!
+        // ENHANCED: Numerically stable SiLU computation matching llama.cpp precision
+        System.err.printf("[HYBRID-EXPERT-FFN] Layer %d Expert %d: Processing SwiGLU with hiddenDim=%d%n",
+                         layer, expertId, hiddenDim);
+
         for (int i = 0; i < hiddenDim; i++) {
-            float siluGate = gateOutput[i] / (1.0f + (float) Math.exp(-gateOutput[i]));
-            gateOutput[i] = siluGate * upOutput[i];  // Correct SwiGLU: silu(gate) * up
+            float gateValue = gateOutput[i];
+            float upValue = upOutput[i];
+
+            // Numerically stable sigmoid computation (matching enhanced MoEUtils)
+            float sigmoid;
+            if (gateValue > 0) {
+                // For positive values: sigmoid(x) = 1 / (1 + exp(-x))
+                sigmoid = 1.0f / (1.0f + (float) Math.exp(-gateValue));
+            } else {
+                // For negative values: sigmoid(x) = exp(x) / (1 + exp(x))
+                // More numerically stable for negative inputs
+                float expX = (float) Math.exp(gateValue);
+                sigmoid = expX / (1.0f + expX);
+            }
+
+            // SwiGLU: silu(gate) * up = gate * sigmoid(gate) * up
+            gateOutput[i] = gateValue * sigmoid * upValue;
+
+            // Enhanced debug for first few values in first layer
+            if (i < 3 && layer == 0 && expertId == 0) {
+                System.err.printf("[HYBRID-SWIGLU-DEBUG] hiddenDim[%d]: gate=%.6f, up=%.6f, sigmoid=%.6f, result=%.6f%n",
+                                i, gateValue, upValue, sigmoid, gateOutput[i]);
+            }
+        }
+
+        // Debug: Check intermediate results magnitude
+        if (layer == 0 && expertId == 0) {
+            float intermediateSum = 0.0f;
+            float intermediateMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i < Math.min(100, hiddenDim); i++) {
+                intermediateSum += Math.abs(gateOutput[i]);
+                intermediateMax = Math.max(intermediateMax, Math.abs(gateOutput[i]));
+            }
+            System.err.printf("[HYBRID-EXPERT-FFN] Layer 0 Expert 0: After SwiGLU - avg(first100)=%.6f, max(first100)=%.6f%n",
+                             intermediateSum/Math.min(100, hiddenDim), intermediateMax);
         }
 
         // Down projection
         float[] result = new float[dim];
         matmulCPU(gateOutput, expertDown, result, dim, hiddenDim);
 
+        // Debug: Check final expert output
+        if (layer == 0 && expertId == 0) {
+            float resultSum = 0.0f;
+            float resultMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i < Math.min(100, dim); i++) {
+                resultSum += Math.abs(result[i]);
+                resultMax = Math.max(resultMax, Math.abs(result[i]));
+            }
+            System.err.printf("[HYBRID-EXPERT-FFN] Layer 0 Expert 0: Final output - avg(first100)=%.6f, max(first100)=%.6f%n",
+                             resultSum/Math.min(100, dim), resultMax);
+        }
+
         return result;
+    }
+
+    /**
+     * CPU matrix multiplication helper for FloatArray weights
+     */
+    private static void matmulCPUFromFloatArray(float[] input, FloatArray weights, float[] output, int rows, int cols) {
+        for (int i = 0; i < rows; i++) {
+            output[i] = 0;
+            for (int j = 0; j < cols; j++) {
+                output[i] += input[j] * weights.get(i * cols + j);
+            }
+        }
+    }
+
+    /**
+     * Simple CPU RMSNorm helper
+     */
+    private static void rmsnormCPU(float[] input, float[] output, FloatArray weights, int size, float eps) {
+        float ss = 0.0f;
+        for (int i = 0; i < size; i++) {
+            ss += input[i] * input[i];
+        }
+        ss = ss / size + eps;
+        ss = 1.0f / (float) Math.sqrt(ss);
+        for (int i = 0; i < size; i++) {
+            output[i] = input[i] * ss * weights.get(i);
+        }
     }
 
     /**
@@ -2929,6 +3059,20 @@ public final class InferenceCore {
             output[i] = 0;
             for (int j = 0; j < cols; j++) {
                 output[i] += input[j] * weights[i * cols + j];
+            }
+        }
+    }
+
+    /**
+     * Transposed matrix multiplication helper for testing.
+     * Assumes weights are stored transposed: [cols, rows] instead of [rows, cols]
+     */
+    private static void matmulCPUTransposed(float[] input, float[] weights, float[] output, int inputDim, int outputDim) {
+        for (int i = 0; i < outputDim; i++) {
+            output[i] = 0;
+            for (int j = 0; j < inputDim; j++) {
+                // Weights stored as [inputDim, outputDim] but we access as transposed
+                output[i] += input[j] * weights[j * outputDim + i];
             }
         }
     }

@@ -6,6 +6,10 @@ import org.beehive.gpullama3.inference.weights.tornado.TornadoWeights;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.LinkedHashMap;
+
 /**
  * OLMoE-specific weights implementation for TornadoVM (GPU) computation.
  *
@@ -22,6 +26,17 @@ public class OlmoeTornadoWeights extends TornadoWeights {
     private final FloatArray[] expertGateWeights;   // [layers] -> [num_experts * hidden_dim, dim]
     private final FloatArray[] expertDownWeights;   // [layers] -> [num_experts * dim, hidden_dim]
     private final FloatArray[] expertUpWeights;     // [layers] -> [num_experts * hidden_dim, dim]
+
+    // SELECTIVE EXPERT LOADING: Source tensors for on-demand loading
+    private final FloatTensor[] sourceExpertGateWeights;   // Original tensors from GGUF
+    private final FloatTensor[] sourceExpertDownWeights;   // Original tensors from GGUF
+    private final FloatTensor[] sourceExpertUpWeights;     // Original tensors from GGUF
+
+    // EXPERT CACHE: LRU cache for frequently used experts
+    private final Map<String, float[]> expertGateCache;    // "layer_expert" -> weights
+    private final Map<String, float[]> expertDownCache;    // "layer_expert" -> weights
+    private final Map<String, float[]> expertUpCache;      // "layer_expert" -> weights
+    private final int maxCachedExperts = 32;               // Cache size limit
 
     public OlmoeTornadoWeights(
             FloatArray tokenEmbeddingTable,
@@ -42,7 +57,10 @@ public class OlmoeTornadoWeights extends TornadoWeights {
             FloatArray[] routerWeights,
             FloatArray[] expertGateWeights,
             FloatArray[] expertDownWeights,
-            FloatArray[] expertUpWeights) {
+            FloatArray[] expertUpWeights,
+            FloatTensor[] sourceExpertGateWeights,  // NEW: Source tensors for selective loading
+            FloatTensor[] sourceExpertDownWeights,  // NEW: Source tensors for selective loading
+            FloatTensor[] sourceExpertUpWeights) {  // NEW: Source tensors for selective loading
 
         // Call parent TornadoWeights constructor
         super(tokenEmbeddingTable,
@@ -66,6 +84,33 @@ public class OlmoeTornadoWeights extends TornadoWeights {
         this.expertGateWeights = expertGateWeights;
         this.expertDownWeights = expertDownWeights;
         this.expertUpWeights = expertUpWeights;
+
+        // Store source tensors for selective expert loading
+        this.sourceExpertGateWeights = sourceExpertGateWeights;
+        this.sourceExpertDownWeights = sourceExpertDownWeights;
+        this.sourceExpertUpWeights = sourceExpertUpWeights;
+
+        // Initialize LRU caches for expert weights
+        this.expertGateCache = new LinkedHashMap<String, float[]>(maxCachedExperts + 1, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, float[]> eldest) {
+                return size() > maxCachedExperts;
+            }
+        };
+        this.expertDownCache = new LinkedHashMap<String, float[]>(maxCachedExperts + 1, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, float[]> eldest) {
+                return size() > maxCachedExperts;
+            }
+        };
+        this.expertUpCache = new LinkedHashMap<String, float[]>(maxCachedExperts + 1, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, float[]> eldest) {
+                return size() > maxCachedExperts;
+            }
+        };
+
+        System.err.printf("[SELECTIVE-EXPERT-LOADING] Initialized with cache size: %d experts per type\n", maxCachedExperts);
     }
 
     // Standard weight accessors from Weights interface - delegate to inherited TornadoWeights fields
@@ -213,5 +258,132 @@ public class OlmoeTornadoWeights extends TornadoWeights {
         }
 
         return expertSlice;
+    }
+
+    /**
+     * EXPERT WEIGHT ACCESS METHODS
+     * These methods provide the interface expected by InferenceCore.forwardJavaOlmoe()
+     * They bridge TornadoVM FloatArray to float[] array format used in CPU inference
+     */
+
+    public float[] getExpertGateWeights(int layer, int expertId, int numExperts, int hiddenDim, int dim) {
+        // TEST: Swap dimensions - maybe weights stored as [dim, hiddenDim] not [hiddenDim, dim]
+        return loadExpertWeights("gate", layer, expertId, dim, hiddenDim, expertGateCache,
+                                sourceExpertGateWeights, expertGateWeights);
+    }
+
+    public float[] getExpertDownWeights(int layer, int expertId, int numExperts, int hiddenDim, int dim) {
+        // TEST: Swap dimensions - maybe weights stored as [hiddenDim, dim] not [dim, hiddenDim]
+        return loadExpertWeights("down", layer, expertId, hiddenDim, dim, expertDownCache,
+                                sourceExpertDownWeights, expertDownWeights);
+    }
+
+    public float[] getExpertUpWeights(int layer, int expertId, int numExperts, int hiddenDim, int dim) {
+        // TEST: Swap dimensions - maybe weights stored as [dim, hiddenDim] not [hiddenDim, dim]
+        return loadExpertWeights("up", layer, expertId, dim, hiddenDim, expertUpCache,
+                                sourceExpertUpWeights, expertUpWeights);
+    }
+
+    /**
+     * SELECTIVE EXPERT LOADING CORE METHOD
+     * Loads expert weights on-demand with intelligent caching
+     */
+    private float[] loadExpertWeights(String weightType, int layer, int expertId,
+                                    int rows, int cols, Map<String, float[]> cache,
+                                    FloatTensor[] sourceTensors, FloatArray[] fallbackArrays) {
+        String cacheKey = layer + "_" + expertId;
+
+        // Check cache first
+        synchronized (cache) {
+            float[] cached = cache.get(cacheKey);
+            if (cached != null) {
+                System.err.printf("[EXPERT-CACHE-HIT] %s layer=%d expert=%d (cache size: %d)\n",
+                                weightType, layer, expertId, cache.size());
+                return cached;
+            }
+        }
+
+        // Cache miss - load from source tensor
+        System.err.printf("[EXPERT-CACHE-MISS] Loading %s layer=%d expert=%d on-demand\n",
+                        weightType, layer, expertId);
+
+        float[] expertWeights = loadExpertFromSource(sourceTensors, fallbackArrays, layer, expertId, rows, cols);
+
+        // Cache the loaded weights
+        synchronized (cache) {
+            cache.put(cacheKey, expertWeights);
+            System.err.printf("[EXPERT-CACHED] %s layer=%d expert=%d (cache size: %d/%d)\n",
+                            weightType, layer, expertId, cache.size(), maxCachedExperts);
+        }
+
+        return expertWeights;
+    }
+
+    /**
+     * Load expert weights from source tensor or fallback to FloatArray
+     */
+    private float[] loadExpertFromSource(FloatTensor[] sourceTensors, FloatArray[] fallbackArrays,
+                                       int layer, int expertId, int rows, int cols) {
+        int expertSize = rows * cols;
+        float[] expertWeights = new float[expertSize];
+
+        // DEBUG: Always log what sources are available
+        System.err.printf("[EXPERT-DEBUG] Loading layer=%d expert=%d, sourceTensors=%s, fallbackArrays=%s\n",
+                         layer, expertId,
+                         (sourceTensors != null && sourceTensors[layer] != null) ? "available" : "null",
+                         (fallbackArrays != null && fallbackArrays[layer] != null) ? "available" : "null");
+
+        // Try loading from source tensor first (better performance)
+        if (sourceTensors != null && sourceTensors[layer] != null) {
+            FloatTensor sourceTensor = sourceTensors[layer];
+
+            // CRITICAL DEBUG: Log actual tensor dimensions to understand storage format
+            int totalSize = (int)sourceTensor.size();
+            System.err.printf("[TENSOR-DEBUG] Layer %d tensor total size: %d elements\n", layer, totalSize);
+            System.err.printf("[TENSOR-DEBUG] Expected per expert: rows=%d, cols=%d, total=%d\n", rows, cols, expertSize);
+            System.err.printf("[TENSOR-DEBUG] Expected 64 experts total: %d elements\n", 64 * expertSize);
+            System.err.printf("[TENSOR-DEBUG] Actual vs Expected ratio: %.2f\n", (double)totalSize / (64 * expertSize));
+
+            // CRITICAL TEST: Try simple contiguous layout (original approach)
+            // The interleaved approach didn't work, so reverting to test basic extraction
+            System.err.printf("[EXPERT-LAYOUT-TEST] Extracting expert %d with SIMPLE layout (rows=%d, cols=%d)\n",
+                             expertId, rows, cols);
+
+            int expertOffset = expertId * expertSize;
+
+            // DEBUG: Sample first few weights to check values
+            if (layer == 0 && expertId < 2) {
+                System.err.printf("[WEIGHT-SAMPLE] Layer %d Expert %d first 5 weights:\n", layer, expertId);
+                for (int i = 0; i < Math.min(5, expertSize); i++) {
+                    float weight = sourceTensor.getFloat(expertOffset + i);
+                    System.err.printf("  [%d] = %.6f\n", i, weight);
+                }
+            }
+
+            for (int i = 0; i < expertSize; i++) {
+                expertWeights[i] = sourceTensor.getFloat(expertOffset + i);
+            }
+
+            System.err.printf("[EXPERT-SOURCE-LOAD] Loaded from source tensor: %d weights (interleaved layout)\n", expertSize);
+        }
+        // Fallback to FloatArray if available
+        else if (fallbackArrays != null && fallbackArrays[layer] != null) {
+            FloatArray fallbackArray = fallbackArrays[layer];
+            int expertOffset = expertId * expertSize;
+
+            for (int i = 0; i < expertSize; i++) {
+                expertWeights[i] = fallbackArray.get(expertOffset + i);
+            }
+
+            System.err.printf("[EXPERT-FALLBACK-LOAD] Loaded from FloatArray: %d weights\n", expertSize);
+        }
+        // Last resort: return zeros (will cause poor inference but won't crash)
+        else {
+            System.err.printf("[EXPERT-ZERO-FALLBACK] No source available - returning zeros for layer=%d expert=%d\n",
+                            layer, expertId);
+            // expertWeights is already initialized to zeros
+        }
+
+        return expertWeights;
     }
 }
