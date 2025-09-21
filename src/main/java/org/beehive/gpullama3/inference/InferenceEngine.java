@@ -345,18 +345,30 @@ public final class InferenceEngine {
         }
 
         // Initialize token variables
-        int currentToken = state.latestToken;
         int nextToken;
         int promptIndex = promptTokensProcessedInBatch; // Skip already processed prompt tokens
         int pos = startPosition + promptTokensProcessedInBatch; // Start after batch-processed prompt tokens
-        
-        // TOKENIZATION FIX: Set current token to last processed prompt token for proper transition
-        if (promptTokensProcessedInBatch > 0 && !promptTokens.isEmpty()) {
-            // Use the last prompt token that was batch-processed as the current token
-            int lastPromptToken = promptTokens.get(promptTokensProcessedInBatch - 1);
-            currentToken = lastPromptToken;
-            System.err.printf("[TOKENIZATION-FIX] Set currentToken to last batch-processed prompt token: %d (position %d)%n", 
-                             currentToken, startPosition + promptTokensProcessedInBatch - 1);
+
+        // CRITICAL OLMOE PROMPT FIX: Set currentToken to the ACTUAL prompt token for current position
+        // This fixes OLMoE-specific prompt processing bug while preserving other models
+        int currentToken;
+        boolean isOlmoeModel = model.getClass().getSimpleName().equals("Olmoe");
+        System.err.printf("[PROMPT-FIX-DEBUG] Model class: %s, isOlmoeModel: %s, promptIndex: %d, promptTokens.size(): %d%n",
+                         model.getClass().getSimpleName(), isOlmoeModel, promptIndex, promptTokens.size());
+        if (isOlmoeModel && promptIndex < promptTokens.size()) {
+            // OLMoE: Use the current prompt token for the current position
+            currentToken = promptTokens.get(promptIndex);
+            System.err.printf("[OLMOE-PROMPT-FIX] Set currentToken to current prompt token: %d at promptIndex=%d, pos=%d%n",
+                             currentToken, promptIndex, pos);
+        } else {
+            // Other models: Use existing logic (state.latestToken)
+            currentToken = state.latestToken;
+            if (isOlmoeModel) {
+                System.err.printf("[OLMOE-PROMPT-FIX] Past prompt, using state.latestToken: %d at pos=%d%n",
+                                 currentToken, pos);
+            } else {
+                System.err.printf("[PROMPT-FIX-DEBUG] Non-OLMoE model using state.latestToken: %d%n", currentToken);
+            }
         }
 
         if (isVLM) {
@@ -652,10 +664,25 @@ public final class InferenceEngine {
         List<Integer> generatedTokens = new ArrayList<>(estimatedCapacity);
 
         // === Token Generation Loop ===
-        int currentToken = state.latestToken;
+        // CRITICAL OLMOE PROMPT FIX: Set currentToken to the ACTUAL prompt token for current position
         int nextToken;
         int promptIndex = 0;
         int pos = startPosition;
+
+        // Fix prompt processing for OLMoE models
+        int currentToken;
+        boolean isOlmoeModel = model.getClass().getSimpleName().equals("Olmoe");
+        if (isOlmoeModel && promptIndex < promptTokens.size()) {
+            // OLMoE: Use the current prompt token for the current position
+            currentToken = promptTokens.get(promptIndex);
+            System.err.printf("[OLMOE-GPU-PROMPT-FIX] Set currentToken to current prompt token: %d at promptIndex=%d, pos=%d%n",
+                             currentToken, promptIndex, pos);
+        } else {
+            // Other models: Use existing logic (state.latestToken)
+            currentToken = state.latestToken;
+            System.err.printf("[GPU-PROMPT-DEBUG] Model: %s, using state.latestToken: %d%n",
+                             model.getClass().getSimpleName(), currentToken);
+        }
 
         // Use more efficient direct array access for prompt tokens if possible
         int[] promptTokenArray = null;

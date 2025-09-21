@@ -2607,11 +2607,52 @@ public final class InferenceCore {
         wkTensor.matmul(convertArrayToTensor(normInput), convertArrayToTensor(keyOutput), dim, dim);
         wvTensor.matmul(convertArrayToTensor(normInput), convertArrayToTensor(valueOutput), dim, dim);
 
-        // CRITICAL FIX: Apply Q/K normalization AFTER reshaping to 3D (like llama.cpp) but BEFORE RoPE
-        // llama.cpp does: Q/K projections -> reshape_3d -> Q/K norm -> RoPE -> attention
-        // Our old implementation was doing: Q/K projections -> Q/K norm -> RoPE -> attention (missing 3D reshape step)
+        // CRITICAL FIX: Apply Q/K normalization BEFORE reshaping (matching llama.cpp exactly)
+        // llama.cpp order: Q/K projections -> Q/K norm (2D) -> reshape_3d -> RoPE -> attention
+        // OLD wrong order: Q/K projections -> reshape_3d -> Q/K norm (3D) -> RoPE -> attention
 
-        // First, reshape Q/K/V to 3D format: [dim] -> [headDim, numHeads, 1] (for single token)
+        // Apply Q/K normalization on 2D tensors (BEFORE reshaping)
+        FloatTensor attnQNorm = convertFloatArrayToTensor(olmoeWeights.getAttnQNormWeights(layer));
+        FloatTensor attnKNorm = convertFloatArrayToTensor(olmoeWeights.getAttnKNormWeights(layer));
+
+        // Check if Q/K norm weights exist
+        if (attnQNorm == null || attnKNorm == null) {
+            System.err.printf("[QK-NORM-WARNING] Missing Q/K norm weights for layer %d%n", layer);
+        } else {
+            // Apply normalization to the full Q and K tensors (2D)
+            // CRITICAL: In llama.cpp OLMoE, Q/K norm weights are size {n_embd}, full tensor size!
+            // Apply RMSNorm to the FULL Q and K tensors using full-size weights
+            float[] queryNormed = new float[dim];
+            float[] keyNormed = new float[dim];
+
+            // Apply RMSNorm to full Q and K tensors
+            rmsnorm(convertArrayToTensor(queryNormed), convertArrayToTensor(queryOutput), attnQNorm, 0, dim, config.rmsNormEps());
+            rmsnorm(convertArrayToTensor(keyNormed), convertArrayToTensor(keyOutput), attnKNorm, 0, dim, config.rmsNormEps());
+
+            // Copy normalized values back
+            System.arraycopy(queryNormed, 0, queryOutput, 0, dim);
+            System.arraycopy(keyNormed, 0, keyOutput, 0, dim);
+
+            // Debug: Log Q/K normalization impact for first layer
+            if (layer == 0 && position <= 1) {
+                float qSum = 0.0f, kSum = 0.0f;
+                for (int i = 0; i < Math.min(5, dim); i++) {
+                    qSum += queryOutput[i];
+                    kSum += keyOutput[i];
+                }
+                System.err.printf("[QK-NORM-DEBUG] Layer 0 Pos %d: After Q/K norm (2D) - Q sum(first5)=%.6f, K sum(first5)=%.6f%n", position, qSum, kSum);
+
+                // DETAILED NUMERICAL DEBUG: First 10 values for comparison with Ollama
+                System.err.printf("[NUMERICAL-DEBUG-Q] Layer 0 Pos %d: Q[0-9] = [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                    position, queryOutput[0], queryOutput[1], queryOutput[2], queryOutput[3], queryOutput[4],
+                    queryOutput[5], queryOutput[6], queryOutput[7], queryOutput[8], queryOutput[9]);
+                System.err.printf("[NUMERICAL-DEBUG-K] Layer 0 Pos %d: K[0-9] = [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                    position, keyOutput[0], keyOutput[1], keyOutput[2], keyOutput[3], keyOutput[4],
+                    keyOutput[5], keyOutput[6], keyOutput[7], keyOutput[8], keyOutput[9]);
+            }
+        }
+
+        // Now reshape Q/K/V to 3D format: [dim] -> [numHeads][headDim][1] (for single token)
         float[][][] queryReshaped = new float[numHeads][headDim][1];
         float[][][] keyReshaped = new float[numHeads][headDim][1];
         float[][][] valueReshaped = new float[numHeads][headDim][1];
@@ -2626,52 +2667,6 @@ public final class InferenceCore {
             }
         }
 
-        // Apply Q and K normalization in 3D space (per head)
-        FloatTensor attnQNorm = convertFloatArrayToTensor(olmoeWeights.getAttnQNormWeights(layer));
-        FloatTensor attnKNorm = convertFloatArrayToTensor(olmoeWeights.getAttnKNormWeights(layer));
-
-        for (int h = 0; h < numHeads; h++) {
-            final int currentHead = h; // Make variable effectively final for inner class
-            // Extract head data for normalization
-            float[] qHead = new float[headDim];
-            float[] kHead = new float[headDim];
-            for (int d = 0; d < headDim; d++) {
-                qHead[d] = queryReshaped[h][d][0];
-                kHead[d] = keyReshaped[h][d][0];
-            }
-
-            // Apply RMSNorm per head using weights for this head's dimension
-            float[] qHeadNormed = new float[headDim];
-            float[] kHeadNormed = new float[headDim];
-
-            // Get normalization weights for this head's portion
-            FloatTensor qNormHead = new FloatTensor() {
-                @Override public int size() { return headDim; }
-                @Override public float getFloat(int index) { return attnQNorm.getFloat(currentHead * headDim + index); }
-                @Override public void setFloat(int index, float value) { throw new UnsupportedOperationException(); }
-                @Override public java.lang.foreign.MemorySegment asMemorySegment() { throw new UnsupportedOperationException(); }
-                @Override protected org.beehive.gpullama3.core.model.GGMLType type() { return org.beehive.gpullama3.core.model.GGMLType.F32; }
-                @Override public jdk.incubator.vector.FloatVector getFloatVector(jdk.incubator.vector.VectorSpecies<Float> species, int index) { throw new UnsupportedOperationException(); }
-            };
-            FloatTensor kNormHead = new FloatTensor() {
-                @Override public int size() { return headDim; }
-                @Override public float getFloat(int index) { return attnKNorm.getFloat(currentHead * headDim + index); }
-                @Override public void setFloat(int index, float value) { throw new UnsupportedOperationException(); }
-                @Override public java.lang.foreign.MemorySegment asMemorySegment() { throw new UnsupportedOperationException(); }
-                @Override protected org.beehive.gpullama3.core.model.GGMLType type() { return org.beehive.gpullama3.core.model.GGMLType.F32; }
-                @Override public jdk.incubator.vector.FloatVector getFloatVector(jdk.incubator.vector.VectorSpecies<Float> species, int index) { throw new UnsupportedOperationException(); }
-            };
-
-            rmsnorm(convertArrayToTensor(qHeadNormed), convertArrayToTensor(qHead), qNormHead, 0, headDim, config.rmsNormEps());
-            rmsnorm(convertArrayToTensor(kHeadNormed), convertArrayToTensor(kHead), kNormHead, 0, headDim, config.rmsNormEps());
-
-            // Put normalized data back into reshaped arrays
-            for (int d = 0; d < headDim; d++) {
-                queryReshaped[h][d][0] = qHeadNormed[d];
-                keyReshaped[h][d][0] = kHeadNormed[d];
-            }
-        }
-
         // Flatten back to [dim] format for RoPE and subsequent processing
         for (int h = 0; h < numHeads; h++) {
             for (int d = 0; d < headDim; d++) {
@@ -2680,16 +2675,6 @@ public final class InferenceCore {
                 keyOutput[idx] = keyReshaped[h][d][0];
                 valueOutput[idx] = valueReshaped[h][d][0];
             }
-        }
-
-        // Debug: Log Q/K normalization impact for first layer
-        if (layer == 0) {
-            float qSum = 0.0f, kSum = 0.0f;
-            for (int i = 0; i < Math.min(5, dim); i++) {
-                qSum += queryOutput[i];
-                kSum += keyOutput[i];
-            }
-            System.err.printf("[QK-NORM-3D-DEBUG] Layer 0: After 3D Q/K norm - Q sum(first5)=%.6f, K sum(first5)=%.6f%n", qSum, kSum);
         }
 
         // Apply RoPE (Rotary Position Embedding) AFTER Q/K normalization
@@ -2703,11 +2688,44 @@ public final class InferenceCore {
             for (int i = 0; i < freq_cis_imag.length; i++) {
                 freq_cis_imag[i] = olmoeWeights.freq_cis_imagFlat.get(i);
             }
+            // Debug RoPE frequencies for first layer
+            if (layer == 0 && position <= 1) {
+                System.err.printf("[ROPE-DEBUG] Layer 0 Pos %d: freq_cis_real[0-4] = [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                    position, freq_cis_real[0], freq_cis_real[1], freq_cis_real[2], freq_cis_real[3], freq_cis_real[4]);
+                System.err.printf("[ROPE-DEBUG] Layer 0 Pos %d: freq_cis_imag[0-4] = [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                    position, freq_cis_imag[0], freq_cis_imag[1], freq_cis_imag[2], freq_cis_imag[3], freq_cis_imag[4]);
+            }
+
             applyRoPE(queryOutput, keyOutput, position, headDim, numHeads, freq_cis_real, freq_cis_imag);
+
+            // Debug Q/K values after RoPE
+            if (layer == 0 && position <= 1) {
+                System.err.printf("[POST-ROPE-DEBUG-Q] Layer 0 Pos %d: Q[0-9] = [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                    position, queryOutput[0], queryOutput[1], queryOutput[2], queryOutput[3], queryOutput[4],
+                    queryOutput[5], queryOutput[6], queryOutput[7], queryOutput[8], queryOutput[9]);
+                System.err.printf("[POST-ROPE-DEBUG-K] Layer 0 Pos %d: K[0-9] = [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                    position, keyOutput[0], keyOutput[1], keyOutput[2], keyOutput[3], keyOutput[4],
+                    keyOutput[5], keyOutput[6], keyOutput[7], keyOutput[8], keyOutput[9]);
+            }
+        }
+
+        // CRITICAL FIX: Store current position's K and V in KV cache before attention computation
+        // This was missing in the hybrid path, causing cached key retrieval to return 0.0 values
+        int kvDim = (config.dim() * config.numberOfKeyValueHeads()) / config.numberOfHeads();
+
+        // Store current K and V in cache for future positions to access
+        for (int i = 0; i < kvDim; i++) {
+            state.keyCache[layer].setFloat(position * kvDim + i, keyOutput[i]);
+            state.valueCache[layer].setFloat(position * kvDim + i, valueOutput[i]);
+        }
+
+        // Debug: Verify KV cache storage for first position
+        if (layer == 0 && position <= 1) {
+            System.err.printf("[KV-STORE-DEBUG] Layer %d Pos %d: Stored K[0-4] = [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                layer, position, keyOutput[0], keyOutput[1], keyOutput[2], keyOutput[3], keyOutput[4]);
         }
 
         // Multi-head attention computation
-        int kvDim = (config.dim() * config.numberOfKeyValueHeads()) / config.numberOfHeads();
         float[] attentionOutput = computeMultiHeadAttention(queryOutput, keyOutput, valueOutput,
                                                           state, layer, position, numHeads, headDim, kvDim);
 
@@ -4245,6 +4263,12 @@ public final class InferenceCore {
                         float cos = freq_cis_real[freqIndex];
                         float sin = freq_cis_imag[freqIndex];
 
+                        // Debug: Check actual frequency values being used
+                        if (position <= 1 && head == 0 && (i / 2) <= 4) {
+                            System.err.printf("[ROPE-APPLY-DEBUG] pos=%d, head=%d, i=%d, freqIndex=%d, cos=%.6f, sin=%.6f%n",
+                                position, head, i, freqIndex, cos, sin);
+                        }
+
                         // Apply RoPE to query
                         float q0 = query[headOffset + i];
                         float q1 = query[headOffset + i + 1];
@@ -4296,14 +4320,30 @@ public final class InferenceCore {
                     }
                 } else {
                     // Previous positions - retrieve from KV cache
+                    // CRITICAL FIX: Correct indexing to match storage format
+                    // Storage uses: pos * kvDim + i (where i = 0 to kvDim-1)
+                    // Retrieval needs: pos * kvDim + (head_start_index + local_i)
                     for (int i = 0; i < headDim; i++) {
-                        float cachedKey = state.keyCache[layer].getFloat(pos * kvDim + headOffset + i);
+                        int keyIndex = pos * kvDim + headOffset + i;
+                        float cachedKey = state.keyCache[layer].getFloat(keyIndex);
                         score += currentQuery[i] * cachedKey;
+
+                        // Debug: Check cached key values for first head, first position
+                        if (layer == 0 && head == 0 && pos == 0 && i <= 4) {
+                            System.err.printf("[KV-CACHE-DEBUG] Layer %d Head %d: cached_key[%d][%d]=%.6f (index=%d)%n",
+                                layer, head, pos, i, cachedKey, keyIndex);
+                        }
                     }
                 }
 
                 scores[pos] = score / (float) Math.sqrt(headDim); // Scale by sqrt(d_k)
                 maxScore = Math.max(maxScore, scores[pos]);
+
+                // Debug raw attention scores for first layer, first head
+                if (layer == 0 && head == 0 && position <= 1 && pos <= position) {
+                    System.err.printf("[ATTENTION-SCORES] Layer %d Head %d: Q·K[%d]=%.6f, scaled=%.6f%n",
+                        layer, head, pos, score * Math.sqrt(headDim), scores[pos]);
+                }
             }
 
             // Apply softmax
@@ -4314,6 +4354,16 @@ public final class InferenceCore {
             }
             for (int pos = 0; pos <= position; pos++) {
                 scores[pos] /= sum;
+            }
+
+            // Debug attention weights for first layer, first head, first few positions
+            if (layer == 0 && head == 0 && position <= 2) {
+                System.err.printf("[ATTENTION-DEBUG] Layer %d Head %d Pos %d: maxScore=%.6f, sum=%.6f%n",
+                    layer, head, position, maxScore, sum);
+                for (int pos = 0; pos <= Math.min(position, 4); pos++) {
+                    System.err.printf("[ATTENTION-WEIGHTS] Layer %d Head %d: pos[%d]=%.6f%n",
+                        layer, head, pos, scores[pos]);
+                }
             }
 
             // Apply attention weights to values
