@@ -593,6 +593,10 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
         HalfFloatArray[] outputWeights = new HalfFloatArray[numLayers];
         FloatArray[] ffnNorms = new FloatArray[numLayers];
 
+        // CRITICAL: Load OLMoE-specific Q/K normalization weights
+        FloatArray[] attnQNormWeights = new FloatArray[numLayers];    // Q normalization weights
+        FloatArray[] attnKNormWeights = new FloatArray[numLayers];    // K normalization weights
+
         // Load MoE-specific weights as FloatArrays
         FloatArray[] routerWeights = new FloatArray[numLayers];
         FloatArray[] expertGateWeights = new FloatArray[numLayers];
@@ -608,6 +612,18 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             outputWeights[i] = convertToHalfFloatArray(loadedTensors.getOrDefault("blk." + i + ".attn_output.weight",
                                                                                  loadedTensors.get("blk." + i + ".attn_out.weight")));
             ffnNorms[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_norm.weight"));
+
+            // CRITICAL: Load OLMoE-specific Q/K normalization weights
+            attnQNormWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".attn_q_norm.weight"));
+            attnKNormWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".attn_k_norm.weight"));
+
+            // Validate that Q/K norm weights were loaded successfully
+            if (attnQNormWeights[i] == null) {
+                throw new IllegalArgumentException("Missing Q normalization weights for layer " + i);
+            }
+            if (attnKNormWeights[i] == null) {
+                throw new IllegalArgumentException("Missing K normalization weights for layer " + i);
+            }
 
             // Convert MoE weights to FloatArrays
             routerWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_gate_inp.weight"));
@@ -672,6 +688,8 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 expertGateWeights,                     // MoE-specific: expertGateWeights
                 expertDownWeights,                     // MoE-specific: expertDownWeights
                 expertUpWeights,                       // MoE-specific: expertUpWeights
+                attnQNormWeights,                      // CRITICAL: Q normalization weights
+                attnKNormWeights,                      // CRITICAL: K normalization weights
                 sourceExpertGateWeights,               // NEW: Source tensors for selective loading
                 sourceExpertDownWeights,               // NEW: Source tensors for selective loading
                 sourceExpertUpWeights                  // NEW: Source tensors for selective loading

@@ -27,6 +27,10 @@ public class OlmoeTornadoWeights extends TornadoWeights {
     private final FloatArray[] expertDownWeights;   // [layers] -> [num_experts * dim, hidden_dim]
     private final FloatArray[] expertUpWeights;     // [layers] -> [num_experts * hidden_dim, dim]
 
+    // OLMoE-specific Q/K normalization weights (CRITICAL for correct attention)
+    private final FloatArray[] attnQNormWeights;    // [layers] -> [dim] - Query normalization weights
+    private final FloatArray[] attnKNormWeights;    // [layers] -> [dim] - Key normalization weights
+
     // SELECTIVE EXPERT LOADING: Source tensors for on-demand loading
     private final FloatTensor[] sourceExpertGateWeights;   // Original tensors from GGUF
     private final FloatTensor[] sourceExpertDownWeights;   // Original tensors from GGUF
@@ -58,6 +62,8 @@ public class OlmoeTornadoWeights extends TornadoWeights {
             FloatArray[] expertGateWeights,
             FloatArray[] expertDownWeights,
             FloatArray[] expertUpWeights,
+            FloatArray[] attnQNormWeights,          // NEW: Q normalization weights
+            FloatArray[] attnKNormWeights,          // NEW: K normalization weights
             FloatTensor[] sourceExpertGateWeights,  // NEW: Source tensors for selective loading
             FloatTensor[] sourceExpertDownWeights,  // NEW: Source tensors for selective loading
             FloatTensor[] sourceExpertUpWeights) {  // NEW: Source tensors for selective loading
@@ -84,6 +90,10 @@ public class OlmoeTornadoWeights extends TornadoWeights {
         this.expertGateWeights = expertGateWeights;
         this.expertDownWeights = expertDownWeights;
         this.expertUpWeights = expertUpWeights;
+
+        // Store OLMoE Q/K normalization weights (CRITICAL for correct attention)
+        this.attnQNormWeights = attnQNormWeights;
+        this.attnKNormWeights = attnKNormWeights;
 
         // Store source tensors for selective expert loading
         this.sourceExpertGateWeights = sourceExpertGateWeights;
@@ -282,6 +292,24 @@ public class OlmoeTornadoWeights extends TornadoWeights {
         // TEST: Swap dimensions - maybe weights stored as [dim, hiddenDim] not [hiddenDim, dim]
         return loadExpertWeights("up", layer, expertId, dim, hiddenDim, expertUpCache,
                                 sourceExpertUpWeights, expertUpWeights);
+    }
+
+    /**
+     * Gets Q normalization weights for a layer (CRITICAL for OLMoE attention)
+     * @param layer Layer index
+     * @return FloatArray containing Q normalization weights [dim]
+     */
+    public FloatArray getAttnQNormWeights(int layer) {
+        return attnQNormWeights[layer];
+    }
+
+    /**
+     * Gets K normalization weights for a layer (CRITICAL for OLMoE attention)
+     * @param layer Layer index
+     * @return FloatArray containing K normalization weights [dim]
+     */
+    public FloatArray getAttnKNormWeights(int layer) {
+        return attnKNormWeights[layer];
     }
 
     /**

@@ -2607,7 +2607,92 @@ public final class InferenceCore {
         wkTensor.matmul(convertArrayToTensor(normInput), convertArrayToTensor(keyOutput), dim, dim);
         wvTensor.matmul(convertArrayToTensor(normInput), convertArrayToTensor(valueOutput), dim, dim);
 
-        // Apply RoPE (Rotary Position Embedding) if needed
+        // CRITICAL FIX: Apply Q/K normalization AFTER reshaping to 3D (like llama.cpp) but BEFORE RoPE
+        // llama.cpp does: Q/K projections -> reshape_3d -> Q/K norm -> RoPE -> attention
+        // Our old implementation was doing: Q/K projections -> Q/K norm -> RoPE -> attention (missing 3D reshape step)
+
+        // First, reshape Q/K/V to 3D format: [dim] -> [headDim, numHeads, 1] (for single token)
+        float[][][] queryReshaped = new float[numHeads][headDim][1];
+        float[][][] keyReshaped = new float[numHeads][headDim][1];
+        float[][][] valueReshaped = new float[numHeads][headDim][1];
+
+        // Reshape Q, K, V from [dim] to [numHeads][headDim][1]
+        for (int h = 0; h < numHeads; h++) {
+            for (int d = 0; d < headDim; d++) {
+                int idx = h * headDim + d;
+                queryReshaped[h][d][0] = queryOutput[idx];
+                keyReshaped[h][d][0] = keyOutput[idx];
+                valueReshaped[h][d][0] = valueOutput[idx];
+            }
+        }
+
+        // Apply Q and K normalization in 3D space (per head)
+        FloatTensor attnQNorm = convertFloatArrayToTensor(olmoeWeights.getAttnQNormWeights(layer));
+        FloatTensor attnKNorm = convertFloatArrayToTensor(olmoeWeights.getAttnKNormWeights(layer));
+
+        for (int h = 0; h < numHeads; h++) {
+            final int currentHead = h; // Make variable effectively final for inner class
+            // Extract head data for normalization
+            float[] qHead = new float[headDim];
+            float[] kHead = new float[headDim];
+            for (int d = 0; d < headDim; d++) {
+                qHead[d] = queryReshaped[h][d][0];
+                kHead[d] = keyReshaped[h][d][0];
+            }
+
+            // Apply RMSNorm per head using weights for this head's dimension
+            float[] qHeadNormed = new float[headDim];
+            float[] kHeadNormed = new float[headDim];
+
+            // Get normalization weights for this head's portion
+            FloatTensor qNormHead = new FloatTensor() {
+                @Override public int size() { return headDim; }
+                @Override public float getFloat(int index) { return attnQNorm.getFloat(currentHead * headDim + index); }
+                @Override public void setFloat(int index, float value) { throw new UnsupportedOperationException(); }
+                @Override public java.lang.foreign.MemorySegment asMemorySegment() { throw new UnsupportedOperationException(); }
+                @Override protected org.beehive.gpullama3.core.model.GGMLType type() { return org.beehive.gpullama3.core.model.GGMLType.F32; }
+                @Override public jdk.incubator.vector.FloatVector getFloatVector(jdk.incubator.vector.VectorSpecies<Float> species, int index) { throw new UnsupportedOperationException(); }
+            };
+            FloatTensor kNormHead = new FloatTensor() {
+                @Override public int size() { return headDim; }
+                @Override public float getFloat(int index) { return attnKNorm.getFloat(currentHead * headDim + index); }
+                @Override public void setFloat(int index, float value) { throw new UnsupportedOperationException(); }
+                @Override public java.lang.foreign.MemorySegment asMemorySegment() { throw new UnsupportedOperationException(); }
+                @Override protected org.beehive.gpullama3.core.model.GGMLType type() { return org.beehive.gpullama3.core.model.GGMLType.F32; }
+                @Override public jdk.incubator.vector.FloatVector getFloatVector(jdk.incubator.vector.VectorSpecies<Float> species, int index) { throw new UnsupportedOperationException(); }
+            };
+
+            rmsnorm(convertArrayToTensor(qHeadNormed), convertArrayToTensor(qHead), qNormHead, 0, headDim, config.rmsNormEps());
+            rmsnorm(convertArrayToTensor(kHeadNormed), convertArrayToTensor(kHead), kNormHead, 0, headDim, config.rmsNormEps());
+
+            // Put normalized data back into reshaped arrays
+            for (int d = 0; d < headDim; d++) {
+                queryReshaped[h][d][0] = qHeadNormed[d];
+                keyReshaped[h][d][0] = kHeadNormed[d];
+            }
+        }
+
+        // Flatten back to [dim] format for RoPE and subsequent processing
+        for (int h = 0; h < numHeads; h++) {
+            for (int d = 0; d < headDim; d++) {
+                int idx = h * headDim + d;
+                queryOutput[idx] = queryReshaped[h][d][0];
+                keyOutput[idx] = keyReshaped[h][d][0];
+                valueOutput[idx] = valueReshaped[h][d][0];
+            }
+        }
+
+        // Debug: Log Q/K normalization impact for first layer
+        if (layer == 0) {
+            float qSum = 0.0f, kSum = 0.0f;
+            for (int i = 0; i < Math.min(5, dim); i++) {
+                qSum += queryOutput[i];
+                kSum += keyOutput[i];
+            }
+            System.err.printf("[QK-NORM-3D-DEBUG] Layer 0: After 3D Q/K norm - Q sum(first5)=%.6f, K sum(first5)=%.6f%n", qSum, kSum);
+        }
+
+        // Apply RoPE (Rotary Position Embedding) AFTER Q/K normalization
         if (olmoeWeights.freq_cis_realFlat != null && olmoeWeights.freq_cis_imagFlat != null) {
             // Convert FloatArray to float[] for RoPE computation
             float[] freq_cis_real = new float[olmoeWeights.freq_cis_realFlat.getSize()];
@@ -2957,10 +3042,11 @@ public final class InferenceCore {
         float[] gateOutput = new float[hiddenDim];
         float[] upOutput = new float[hiddenDim];
 
-        // Gate projection
-        matmulCPU(input, expertGate, gateOutput, hiddenDim, dim);
-        // Up projection
-        matmulCPU(input, expertUp, upOutput, hiddenDim, dim);
+        // Gate projection - CRITICAL FIX: Use transposed matmul due to weight layout
+        // Expert weights are stored as [dim, hiddenDim] but we need [hiddenDim, dim]
+        matmulCPUTransposed(input, expertGate, gateOutput, dim, hiddenDim);
+        // Up projection - CRITICAL FIX: Use transposed matmul due to weight layout
+        matmulCPUTransposed(input, expertUp, upOutput, dim, hiddenDim);
 
         // SwiGLU activation: silu(gate) * up
         // ENHANCED: Numerically stable SiLU computation matching llama.cpp precision
@@ -3005,9 +3091,10 @@ public final class InferenceCore {
                              intermediateSum/Math.min(100, hiddenDim), intermediateMax);
         }
 
-        // Down projection
+        // Down projection - CRITICAL FIX: Use transposed matmul due to weight layout
+        // Expert down weights are stored as [hiddenDim, dim] but we need [dim, hiddenDim]
         float[] result = new float[dim];
-        matmulCPU(gateOutput, expertDown, result, dim, hiddenDim);
+        matmulCPUTransposed(gateOutput, expertDown, result, hiddenDim, dim);
 
         // Debug: Check final expert output
         if (layer == 0 && expertId == 0) {
