@@ -2260,8 +2260,13 @@ public final class InferenceCore {
 
         processor.processFinalization(state, olmoeWeights, config);
 
-        // Execute TornadoVM postprocessing (output logits transfer)
-        tornadoVMPlan.executionPlan.withGraph(1).withGridScheduler(tornadoVMPlan.scheduler).execute();
+        // Debug: Check logits after OLMoE processing
+        System.out.printf("[INFERENCE-DEBUG] After OLMoE processing - first 5 logits: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+            state.wrapLogits.get(0), state.wrapLogits.get(1), state.wrapLogits.get(2), state.wrapLogits.get(3), state.wrapLogits.get(4));
+
+        // Skip TornadoVM postprocessing for OLMoE - we already computed logits properly
+        // The postprocessing graph is for weight setup, not per-token logits computation
+        System.out.println("[INFERENCE-DEBUG] Skipping TornadoVM postprocessing for OLMoE - logits already computed");
 
         return state.wrapLogits;
     }

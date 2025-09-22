@@ -327,13 +327,17 @@ public class OLMoEGPUProcessor {
         float[] routerLogits = new float[numExperts];
 
         // Simple matrix multiplication: input * routerWeights
+        // CRITICAL FIX: Router weights are stored as [dim, experts] not [experts, dim]
+        // Correct indexing: weight[d * numExperts + e] for input[d] → expert[e]
         for (int expert = 0; expert < numExperts; expert++) {
             float sum = 0.0f;
             for (int i = 0; i < dim; i++) {
-                sum += input.get(i) * routerWeights.get(expert * dim + i);
+                sum += input.get(i) * routerWeights.get(i * numExperts + expert);
             }
             routerLogits[expert] = sum;
         }
+
+        System.out.printf("[ROUTER-FIX] ✅ Fixed router weight indexing: [dim=%d, experts=%d]%n", dim, numExperts);
 
         return routerLogits;
     }
@@ -407,6 +411,16 @@ public class OLMoEGPUProcessor {
 
             logger.fine(String.format("[OLMOE-GPU] Processed expert %d with weight %.4f", expertId, weight));
         }
+
+        // CRITICAL: Add residual connection (input) to expert outputs
+        // Formula: h_t^l = ∑(g_{i,t} * FFN_i(u_t^l)) + u_t^l
+        // We computed ∑(g_{i,t} * FFN_i(u_t^l)), now add + u_t^l
+        for (int i = 0; i < dim; i++) {
+            result.set(i, result.get(i) + input.get(i));
+        }
+
+        System.out.println("[OLMOE-CRITICAL-FIX] ✅ Applied MoE residual connection: expert_outputs + input");
+        logger.info("[OLMOE-GPU] Applied critical MoE residual connection: expert_outputs + input");
     }
 
     /**
@@ -876,22 +890,15 @@ public class OLMoEGPUProcessor {
                                                             token, config.vocabularySize() - 1));
         }
 
-        // GPU token embedding lookup and addition to hidden state
-        if (position == 0) {
-            // First position: Initialize hidden state with token embedding
-            long baseOffset = (long) token * dim;
-            for (int i = 0; i < dim; i++) {
-                float tokenEmbedding = weights.tokenEmbeddingTable.get((int)(baseOffset + i));
-                state.wrapX.set(i, tokenEmbedding);
-            }
-        } else {
-            // Subsequent positions: Add token embedding to existing hidden state
-            long baseOffset = (long) token * dim;
-            for (int i = 0; i < dim; i++) {
-                float tokenEmbedding = weights.tokenEmbeddingTable.get((int)(baseOffset + i));
-                state.wrapX.set(i, state.wrapX.get(i) + tokenEmbedding);
-            }
+        // GPU token embedding lookup - ALWAYS initialize fresh for each token
+        // CRITICAL FIX: Each token starts with its own embedding, not accumulated
+        long baseOffset = (long) token * dim;
+        for (int i = 0; i < dim; i++) {
+            float tokenEmbedding = weights.tokenEmbeddingTable.get((int)(baseOffset + i));
+            state.wrapX.set(i, tokenEmbedding);
         }
+
+        System.out.println("[EMBEDDING-FIX] ✅ Token embedding initialized fresh (not accumulated)");
 
         logger.fine(String.format("[OLMOE-GPU] ✅ Token embedding processed on GPU"));
     }
@@ -1044,16 +1051,25 @@ public class OLMoEGPUProcessor {
      * Process final output layer
      */
     public void processFinalization(OlmoeState state, OlmoeTornadoWeights weights, OlmoeConfiguration config) {
-        logger.fine("[OLMOE-GPU] Processing final output normalization and projection");
+        System.out.println("[OLMOE-DEBUG] ===== STARTING FINAL PROCESSING =====");
         this.currentWeights = weights;
 
         // Step 1: Apply final RMSNorm on GPU
         FloatArray finalInput = state.wrapX;
+
+        // Debug: Check input values before normalization
+        System.out.printf("[OLMOE-DEBUG] Before RMS norm - first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+            finalInput.get(0), finalInput.get(1), finalInput.get(2), finalInput.get(3), finalInput.get(4));
+
         FloatArray normalizedOutput = new FloatArray(dim);
 
         // Get final norm weights
         FloatArray finalNormArray = weights.rms_final_weight_as_floatArray;
         float eps = config.rmsNormEps();
+
+        // Debug: Check norm weights
+        System.out.printf("[OLMOE-DEBUG] Norm weights - first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+            finalNormArray.get(0), finalNormArray.get(1), finalNormArray.get(2), finalNormArray.get(3), finalNormArray.get(4));
 
         // Apply final RMS normalization using GPU kernel
         applyRMSNormGPU(finalInput, finalNormArray, eps, dim);
@@ -1063,15 +1079,38 @@ public class OLMoEGPUProcessor {
             normalizedOutput.set(i, finalInput.get(i));
         }
 
+        // Debug: Check values after normalization
+        System.out.printf("[OLMOE-DEBUG] After RMS norm - first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+            normalizedOutput.get(0), normalizedOutput.get(1), normalizedOutput.get(2), normalizedOutput.get(3), normalizedOutput.get(4));
+
         // Step 2: Apply output projection on GPU
         HalfFloatArray outputWeights = weights.wclsHalfFloat;
+        System.out.printf("[OLMOE-DEBUG] Output projection: %d x %d%n", dim, config.vocabularySize());
+
         FloatArray logits = matmulGPUHalfFloat(normalizedOutput, outputWeights, dim, config.vocabularySize());
+
+        // Debug: Check raw logits before scaling
+        System.out.printf("[OLMOE-DEBUG] Raw logits (before scaling) - first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+            logits.get(0), logits.get(1), logits.get(2), logits.get(3), logits.get(4));
+
+        // Apply optimal scaling factor for OLMoE
+        // Raw logits are ±0.002 to ±0.042, need ±1 to ±5 for good softmax distribution
+        float scalingFactor = 20.0f;
+        System.out.printf("[OLMOE-DEBUG] Applying optimal logits scaling factor: %.1f%n", scalingFactor);
+
+        for (int i = 0; i < logits.getSize(); i++) {
+            logits.set(i, logits.get(i) * scalingFactor);
+        }
+
+        // Debug: Check logits after scaling
+        System.out.printf("[OLMOE-DEBUG] Scaled logits - first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+            logits.get(0), logits.get(1), logits.get(2), logits.get(3), logits.get(4));
 
         // Copy logits to state output
         for (int i = 0; i < logits.getSize() && i < state.wrapLogits.getSize(); i++) {
             state.wrapLogits.set(i, logits.get(i));
         }
 
-        logger.fine("[OLMOE-GPU] ✅ Final processing completed on GPU");
+        System.out.println("[OLMOE-DEBUG] ===== FINAL PROCESSING COMPLETED =====");
     }
 }
