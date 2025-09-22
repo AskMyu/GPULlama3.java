@@ -285,11 +285,48 @@ public abstract class ModelLoader {
 
     public static FloatTensor loadQuantized(GGMLTensorEntry entry) {
         GGMLType ggmlType = entry.ggmlType();
-        
-        // Debug tensor loading for wcls
-        if (entry.name().contains("output.weight") || entry.name().contains("wcls")) {
-            System.err.printf("[LOAD-QUANTIZED-DEBUG] Loading tensor '%s' with ggmlType=%s (ordinal=%d)%n", 
+
+        // CRITICAL DEBUG: Extensive debugging for OLMoE key tensors
+        if (entry.name().contains("output.weight") || entry.name().contains("wcls") || entry.name().contains("token_embd")) {
+            System.err.printf("[LOAD-QUANTIZED-DEBUG] Loading tensor '%s' with ggmlType=%s (ordinal=%d)%n",
                             entry.name(), ggmlType, ggmlType.ordinal());
+            System.err.printf("[LOAD-QUANTIZED-DEBUG] Shape: %s, numElements: %d, memorySegment size: %d%n",
+                            java.util.Arrays.toString(entry.shape()),
+                            FloatTensor.numberOfElements(entry.shape()),
+                            entry.memorySegment().byteSize());
+
+            // Check memory segment address and offset information
+            var memSeg = entry.memorySegment();
+            System.err.printf("[LOAD-QUANTIZED-DEBUG] MemorySegment address: %s, native address: %s%n",
+                            memSeg.address(),
+                            memSeg.isNative() ? "native" : "heap");
+
+            // Compare with mapped file info
+            var mappedFile = entry.mappedFile();
+            System.err.printf("[LOAD-QUANTIZED-DEBUG] MappedFile size: %d, tensor offset: %d%n",
+                            mappedFile.byteSize(),
+                            memSeg.address() - mappedFile.address());
+
+            // Check raw memory segment data
+            if (memSeg.byteSize() >= 16) {
+                System.err.printf("[LOAD-QUANTIZED-DEBUG] Raw bytes (first 16): %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x%n",
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 0),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 1),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 2),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 3),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 4),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 5),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 6),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 7),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 8),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 9),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 10),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 11),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 12),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 13),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 14),
+                    memSeg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 15));
+            }
         }
         
         return switch (ggmlType) {

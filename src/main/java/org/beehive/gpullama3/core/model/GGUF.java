@@ -57,7 +57,34 @@ public final class GGUF {
 
     public static Map<String, GGMLTensorEntry> loadTensors(FileChannel fileChannel, long tensorDataOffset, Map<String, GGUFTensorInfo> tensorInfos) throws IOException {
         Arena arena = Arena.ofAuto();
+
+        // CRITICAL DEBUG: Show tensor data section mapping
+        System.err.printf("[GGUF-TENSOR-DATA-DEBUG] tensorDataOffset = %d, fileSize = %d, tensorDataSize = %d%n",
+                        tensorDataOffset, fileChannel.size(), fileChannel.size() - tensorDataOffset);
+
         MemorySegment tensorData = fileChannel.map(FileChannel.MapMode.READ_ONLY, tensorDataOffset, fileChannel.size() - tensorDataOffset, arena);
+
+        // CRITICAL DEBUG: Check what's at the start of tensor data section
+        if (tensorData.byteSize() >= 16) {
+            System.err.printf("[GGUF-TENSOR-DATA-DEBUG] First 16 bytes of tensorData: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x%n",
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 0),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 1),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 2),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 3),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 4),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 5),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 6),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 7),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 8),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 9),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 10),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 11),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 12),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 13),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 14),
+                tensorData.get(java.lang.foreign.ValueLayout.JAVA_BYTE, 15));
+        }
+
         Map<String, GGMLTensorEntry> tensorEntries = HashMap.newHashMap(tensorInfos.size());
         for (Map.Entry<String, GGUFTensorInfo> entry : tensorInfos.entrySet()) {
             GGUFTensorInfo ti = entry.getValue();
@@ -94,8 +121,14 @@ public final class GGUF {
         }
         // Padding to the nearest multiple of `ALIGNMENT`.
         // uint8_t _padding[ALIGNMENT - (sizeof(header + tensor_infos) % ALIGNMENT)];
-        //long _padding = -fileChannel.position() & (ALIGNMENT - 1);
-        long _padding = getAlignment() - (fileChannel.position() % getAlignment());
+        // CRITICAL FIX: Only add padding if position is not already aligned
+        long currentPos = fileChannel.position();
+        long remainder = currentPos % getAlignment();
+        long _padding = remainder == 0 ? 0 : (getAlignment() - remainder);
+
+        System.err.printf("[GGUF-PADDING-DEBUG] currentPos=%d, alignment=%d, remainder=%d, padding=%d%n",
+                        currentPos, getAlignment(), remainder, _padding);
+
         fileChannel.position(fileChannel.position() + _padding);
         // Tensor data.
         //
@@ -146,6 +179,13 @@ public final class GGUF {
         // file to make it easier to read the data.
         // Must be a multiple of `ALIGNMENT`.
         long offset = readLong(fileChannel); // uint64_t offset;
+
+        // CRITICAL DEBUG for OLMoE offset issue
+        if (name.contains("token_embd") || name.contains("output")) {
+            System.err.printf("[GGUF-TENSOR-DEBUG] Tensor '%s': Raw offset from GGUF = %d, dimensions = %s, ggmlType = %s%n",
+                            name, offset, java.util.Arrays.toString(dimensions), ggmlType);
+        }
+
         assert offset % getAlignment() == 0;
         return new GGUF.GGUFTensorInfo(name, dimensions, ggmlType, offset);
     }

@@ -117,7 +117,9 @@ public class Olmoe extends AbstractModel {
      */
     @Override
     public boolean shouldAddBeginOfText() {
-        return true;
+        // CRITICAL FIX: OLMoE Tulu chat format already includes proper sequence start
+        // Adding a separate BOS token creates duplicate leading tokens which breaks attention
+        return false;
     }
 
     @Override
@@ -125,15 +127,10 @@ public class Olmoe extends AbstractModel {
         System.err.printf("[OLMOE-FORWARD-DEBUG] plan=%s, tornadoVMPlan()=%s%n",
                          plan, (plan != null) ? "available" : "null");
 
-        if (plan == null) {
-            // OLMoE-specific forward pass with MoE routing (CPU)
-            System.err.println("[OLMOE-FORWARD-DEBUG] Using CPU forward pass - plan is null");
-            InferenceCore.forwardJavaOlmoe(this, (OlmoeState) state, token, position);
-        } else {
-            // OLMoE-specific GPU forward pass with MoE routing
-            System.err.println("[OLMOE-FORWARD-DEBUG] Using GPU forward pass - calling forwardTornadoVMOlmoe");
-            InferenceCore.forwardTornadoVMOlmoe(this, (OlmoeState) state, token, position, tornadoVMPlan());
-        }
+        // CRITICAL FIX: Always use our fixed OLMoE implementation regardless of plan status
+        // This ensures our state management fix is used instead of generic TornadoVM kernels
+        System.err.println("[OLMOE-FORWARD-DEBUG] Using OLMoE-specific GPU forward pass with fixed state management");
+        InferenceCore.forwardTornadoVMOlmoe(this, (OlmoeState) state, token, position, tornadoVMPlan());
     }
 
     @Override

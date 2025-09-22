@@ -137,8 +137,8 @@ public class TornadoVMMasterPlan {
                 yield new DeepSeekR1TornadoVMLayerPlanner((Qwen3State) state, model);
             }
             case OLMOE_1B_7B -> {
-                System.err.println("[TORNADO-PLANNER] Using standard TornadoVMLayerPlanner for OLMOE");
-                yield new TornadoVMLayerPlanner(state, model);
+                System.err.println("[TORNADO-PLANNER] ✅ Using OLMoETornadoVMLayerPlanner for OLMOE");
+                yield new OLMoETornadoVMLayerPlanner((org.beehive.gpullama3.inference.state.OlmoeState) state, model);
             }
             case LLAVA_LLAMA_3_8B, LLAVA_LLAMA_3_8B_INT4 -> {
                 System.err.println("[TORNADO-PLANNER] Using standard TornadoVMLayerPlanner for LLAVA");
@@ -817,8 +817,17 @@ public class TornadoVMMasterPlan {
         // Only copy essential weights like attention and layer norms
         System.err.println("[TORNADO-COPY-MOE] Skipping expert tensor copying for all layers");
 
-        // Execute logits graph
-        executionPlan.withGraph(config.numberOfLayers() + 1).withGridScheduler(scheduler).execute();
+        // Execute logits graph - handle different planner architectures
+        // For OLMoE: Execute minimal logits graph for GPU data setup
+        // For standard planners: execute the full logits weight copying graph
+        if (config instanceof org.beehive.gpullama3.model.olmoe.OlmoeConfiguration) {
+            System.err.println("[TORNADO-COPY-MOE] OLMoE executing minimal logits graph for GPU setup");
+            executionPlan.withGraph(1).withGridScheduler(scheduler).execute();
+        } else {
+            // Standard planner: activation + layer graphs + logits
+            System.err.println("[TORNADO-COPY-MOE] Using standard planner architecture for weight copying");
+            executionPlan.withGraph(config.numberOfLayers() + 1).withGridScheduler(scheduler).execute();
+        }
 
         System.err.println("[TORNADO-COPY-MOE] ✅ MoE minimal weight copying completed");
         System.err.println("[TORNADO-COPY-MOE] ⚠️ Note: Inference may be slower due to on-demand expert loading");

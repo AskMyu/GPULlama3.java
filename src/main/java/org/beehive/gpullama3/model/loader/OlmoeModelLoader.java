@@ -86,9 +86,109 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 0, 0, 0, 0
         );
 
-        // Get token embeddings and output weight
+        // CRITICAL FIX: Check tensor names in GGUF file before loading
+        System.err.println("[OLMOE-TENSOR-DEBUG] Available tensor names in GGUF:");
+        loadedTensors.keySet().stream()
+            .filter(name -> name.contains("token_embd") || name.contains("output") || name.contains("lm_head"))
+            .sorted()
+            .forEach(name -> System.err.println("  " + name));
+
+        // Get token embeddings and output weight - try both with and without .weight suffix
         org.beehive.gpullama3.core.model.tensor.FloatTensor tokenEmbeddings = loadedTensors.get("token_embd.weight");
-        org.beehive.gpullama3.core.model.tensor.FloatTensor outputWeight = loadedTensors.getOrDefault("output.weight", tokenEmbeddings);
+        if (tokenEmbeddings == null) {
+            tokenEmbeddings = loadedTensors.get("token_embd");
+            System.err.println("[OLMOE-TENSOR-DEBUG] Using 'token_embd' (without .weight suffix)");
+        } else {
+            System.err.println("[OLMOE-TENSOR-DEBUG] Using 'token_embd.weight'");
+        }
+
+        org.beehive.gpullama3.core.model.tensor.FloatTensor outputWeight = loadedTensors.get("output.weight");
+        if (outputWeight == null) {
+            outputWeight = loadedTensors.get("output");
+            System.err.println("[OLMOE-TENSOR-DEBUG] Using 'output' (without .weight suffix)");
+        } else {
+            System.err.println("[OLMOE-TENSOR-DEBUG] Using 'output.weight'");
+        }
+
+        // CRITICAL FIX: Check if token_embd contains negative zeros (tied embeddings indicator)
+        boolean tokenEmbedCorrupted = false;
+        if (tokenEmbeddings != null) {
+            // Check for the 00 80 pattern (F16 negative zeros) that indicates tied embeddings
+            float embSum = 0.0f;
+            int negativeZeroCount = 0;
+            for (int i = 0; i < Math.min(1000, tokenEmbeddings.size()); i++) {
+                float val = tokenEmbeddings.getFloat(i);
+                embSum += Math.abs(val);
+                // Check for negative zero pattern (00 80 in F16 = -0.0)
+                if (val == -0.0f || Float.floatToIntBits(val) == 0x80000000) {
+                    negativeZeroCount++;
+                }
+            }
+
+            // If token_embd is mostly negative zeros, OLMoE uses tied embeddings
+            if (embSum < 0.0001f || negativeZeroCount > 500) {
+                tokenEmbedCorrupted = true;
+                System.err.printf("[OLMOE-TIED-EMBEDDINGS] token_embd.weight contains %d negative zeros, sum=%.6f - TIED EMBEDDINGS DETECTED!%n",
+                                negativeZeroCount, embSum);
+                System.err.println("[OLMOE-FIX] Using output.weight as token embeddings (tied embeddings pattern)");
+
+                // CRITICAL FIX: Use output.weight as token embeddings
+                if (outputWeight != null) {
+                    tokenEmbeddings = outputWeight;
+                    System.err.println("[OLMOE-FIX] Successfully replaced token_embd.weight with output.weight");
+                } else {
+                    throw new IllegalArgumentException("CRITICAL: token_embd corrupted and no output.weight found!");
+                }
+            } else {
+                System.err.printf("[OLMOE-EMBEDDINGS-OK] token_embd.weight sum = %.6f, negZeros = %d (normal embeddings)%n",
+                                embSum, negativeZeroCount);
+            }
+        }
+
+        // CRITICAL DEBUG: Check available output-related tensors
+        System.err.println("[OLMOE-TENSOR-DEBUG] Available output-related tensors:");
+        loadedTensors.keySet().stream()
+            .filter(name -> name.contains("output") || name.contains("lm_head") || name.contains("embed"))
+            .sorted()
+            .forEach(name -> System.err.println("  " + name));
+
+        // Try alternative names common in other LLMs
+        FloatTensor lmHeadWeight = loadedTensors.get("lm_head.weight");
+        FloatTensor outputNormWeight = loadedTensors.get("output_norm.weight");
+
+        if (outputWeight == null) {
+            System.err.println("[OLMOE-WEIGHT-ERROR] output.weight not found in GGUF!");
+            if (lmHeadWeight != null) {
+                System.err.println("[OLMOE-WEIGHT-ALTERNATIVE] Using lm_head.weight as output weights");
+                outputWeight = lmHeadWeight;
+            } else {
+                System.err.println("[OLMOE-WEIGHT-FALLBACK] Using tokenEmbeddings as output weights - THIS MAY CAUSE GIBBERISH!");
+                outputWeight = tokenEmbeddings;
+            }
+        } else {
+            System.err.println("[OLMOE-WEIGHT-SUCCESS] Found output.weight tensor");
+
+            // Additional debug: Compare first few values of different tensors
+            if (lmHeadWeight != null) {
+                System.err.printf("[OLMOE-COMPARE] lm_head.weight first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                    lmHeadWeight.getFloat(0), lmHeadWeight.getFloat(1), lmHeadWeight.getFloat(2),
+                    lmHeadWeight.getFloat(3), lmHeadWeight.getFloat(4));
+
+                // CRITICAL FIX: If lm_head.weight exists and is different from output.weight, use it!
+                boolean outputCorrupted = (Math.abs(outputWeight.getFloat(0) + 0.007294f) < 0.000001f &&
+                                         Math.abs(outputWeight.getFloat(1) + 0.009155f) < 0.000001f);
+                boolean lmHeadDifferent = (Math.abs(lmHeadWeight.getFloat(0) + 0.007294f) > 0.000001f ||
+                                         Math.abs(lmHeadWeight.getFloat(1) + 0.009155f) > 0.000001f);
+
+                if (outputCorrupted && lmHeadDifferent) {
+                    System.err.println("[OLMOE-FIX] output.weight appears corrupted, switching to lm_head.weight!");
+                    outputWeight = lmHeadWeight;
+                }
+            }
+            System.err.printf("[OLMOE-COMPARE] token_embd.weight first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                tokenEmbeddings.getFloat(0), tokenEmbeddings.getFloat(1), tokenEmbeddings.getFloat(2),
+                tokenEmbeddings.getFloat(3), tokenEmbeddings.getFloat(4));
+        }
 
         if (Options.getDefaultOptions().useTornadovm()) {
             System.err.println("[OLMOE-NEW] Creating TornadoVM weights");
@@ -260,8 +360,50 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 0, 0, 0, 0
         );
 
+        // CRITICAL FIX: Try both tensor name formats for consistency with llama.cpp
         GGMLTensorEntry tokenEmbeddings = tensorEntries.get("token_embd.weight");
-        GGMLTensorEntry outputWeight = tensorEntries.getOrDefault("output.weight", tokenEmbeddings);
+        if (tokenEmbeddings == null) {
+            tokenEmbeddings = tensorEntries.get("token_embd");
+            System.err.println("[OLMOE-LOADER] Using 'token_embd' tensor entry");
+        } else {
+            System.err.println("[OLMOE-LOADER] Using 'token_embd.weight' tensor entry");
+        }
+
+        GGMLTensorEntry outputWeight = tensorEntries.get("output.weight");
+        if (outputWeight == null) {
+            outputWeight = tensorEntries.get("output");
+            if (outputWeight == null) {
+                outputWeight = tokenEmbeddings; // Fallback to tied embeddings
+                System.err.println("[OLMOE-LOADER] Using tied embeddings for output weights");
+            } else {
+                System.err.println("[OLMOE-LOADER] Using 'output' tensor entry");
+            }
+        } else {
+            System.err.println("[OLMOE-LOADER] Using 'output.weight' tensor entry");
+        }
+
+        // CRITICAL FIX: Check for tied embeddings pattern in tensor entries too
+        boolean tensorEmbedCorrupted = false;
+        if (tokenEmbeddings != null && outputWeight != null) {
+            // Quick check for negative zero pattern by loading first few values
+            FloatTensor tokenTensor = loadQuantized(tokenEmbeddings);
+            float embSum = 0.0f;
+            int negativeZeroCount = 0;
+            for (int i = 0; i < Math.min(100, tokenTensor.size()); i++) {
+                float val = tokenTensor.getFloat(i);
+                embSum += Math.abs(val);
+                if (val == -0.0f || Float.floatToIntBits(val) == 0x80000000) {
+                    negativeZeroCount++;
+                }
+            }
+
+            if (embSum < 0.0001f || negativeZeroCount > 50) {
+                tensorEmbedCorrupted = true;
+                System.err.printf("[OLMOE-TENSOR-ENTRY-TIED] token_embd tensor entry corrupted (sum=%.6f, negZeros=%d), using output.weight%n",
+                                embSum, negativeZeroCount);
+                tokenEmbeddings = outputWeight;
+            }
+        }
 
         if (Options.getDefaultOptions().useTornadovm()) {
             if (TornadoVMMasterPlan.ENABLE_TORNADOVM_INIT_TIME) {
@@ -682,7 +824,7 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 outputNormArray,                       // rms_final_weight_as_floatArray
                 FloatArray.fromArray(ropeFreqs.first()), // freq_cis_realFlat
                 FloatArray.fromArray(ropeFreqs.second()), // freq_cis_imagFlat
-                convertToHalfFloatArray(outputWeight), // wclsHalfFloat
+                convertToHalfFloatArrayWithDebug(outputWeight, "wclsHalfFloat"), // wclsHalfFloat
                 GGMLType.F32,                          // weightType
                 routerWeights,                         // MoE-specific: routerWeights
                 expertGateWeights,                     // MoE-specific: expertGateWeights
@@ -710,6 +852,25 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
         }
 
         return array;
+    }
+
+    /**
+     * Debug version of convertToHalfFloatArray that logs source data
+     */
+    private HalfFloatArray convertToHalfFloatArrayWithDebug(org.beehive.gpullama3.core.model.tensor.FloatTensor tensor, String name) {
+        if (tensor == null) {
+            System.err.printf("[WEIGHT-DEBUG] %s: tensor is null%n", name);
+            return null;
+        }
+
+        System.err.printf("[WEIGHT-DEBUG] %s: Converting tensor size=%d%n", name, tensor.size());
+
+        // Debug: Check first few values of source tensor
+        System.err.printf("[WEIGHT-DEBUG] %s: Source tensor first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         name, tensor.getFloat(0), tensor.getFloat(1), tensor.getFloat(2),
+                         tensor.getFloat(3), tensor.getFloat(4));
+
+        return convertToHalfFloatArray(tensor);
     }
 
     /**
