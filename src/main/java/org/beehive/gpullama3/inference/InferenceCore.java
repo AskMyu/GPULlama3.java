@@ -2513,9 +2513,26 @@ public final class InferenceCore {
         }
         System.err.printf("[FINAL-DEBUG] Post-norm sum of first 5: %.6f%n", postNormSum);
 
-        // Output projection to get logits - convert HalfFloatArray to FloatTensor
-        FloatTensor wclsTensor = convertHalfFloatArrayToTensor(olmoeWeights.wclsHalfFloat);
-        wclsTensor.matmul(state.x, state.logits, vocabularySize, dim);
+        // CRITICAL FIX: Use direct HalfFloatArray matrix multiplication to avoid conversion caching issues
+        // Issue: convertHalfFloatArrayToTensor appears to cache/reuse the same tensor causing identical weights
+        System.err.println("[OLMOE-OUTPUT-FIX] Using direct HalfFloatArray matrix multiplication to avoid conversion caching");
+
+        // Perform matrix multiplication directly with HalfFloatArray without conversion
+        // This should use the native TornadoVM matmul for HalfFloatArray
+        System.err.printf("[DIRECT-MATMUL-DEBUG] HalfFloatArray size: %d, expected: %d%n",
+                         olmoeWeights.wclsHalfFloat.getSize(), vocabularySize * dim);
+
+        // OLMOE-SPECIFIC FIX: Use custom matrix multiplication only for OLMoE to avoid affecting other models
+        // Check if this is specifically the OLMoE TornadoVM forward path
+        if (olmoeWeights instanceof org.beehive.gpullama3.inference.weights.olmoe.OlmoeTornadoWeights) {
+            System.err.println("[OLMOE-SPECIFIC-FIX] Using direct HalfFloatArray matmul for OLMoE only");
+            directHalfFloatMatmul(olmoeWeights.wclsHalfFloat, state.x, state.logits, vocabularySize, dim);
+        } else {
+            // Fallback to standard conversion for non-OLMoE models
+            System.err.println("[STANDARD-PATH] Using standard FloatTensor conversion for non-OLMoE models");
+            FloatTensor wclsTensor = convertHalfFloatArrayToTensor(olmoeWeights.wclsHalfFloat);
+            wclsTensor.matmul(state.x, state.logits, vocabularySize, dim);
+        }
 
         // Debug: Check raw logits values
         float logitsSum = 0.0f;
@@ -3206,6 +3223,34 @@ public final class InferenceCore {
             data[i] = array.get(i).getFloat32();
         }
         return new org.beehive.gpullama3.core.model.tensor.ArrayFloatTensor(data);
+    }
+
+    /**
+     * Direct matrix multiplication from HalfFloatArray to avoid caching issues.
+     * Performs: logits[i] = sum(weights[i * dim + j] * input[j]) for each output i
+     */
+    private static void directHalfFloatMatmul(uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray weights,
+                                             FloatTensor input, FloatTensor output, int rows, int cols) {
+        System.err.printf("[DIRECT-MATMUL] Starting: rows=%d, cols=%d, weights.size=%d, input.size=%d%n",
+                         rows, cols, weights.getSize(), input.size());
+
+        // Check first few weights to verify they're changing
+        System.err.printf("[DIRECT-MATMUL] First 5 weights: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         weights.get(0).getFloat32(), weights.get(1).getFloat32(), weights.get(2).getFloat32(),
+                         weights.get(3).getFloat32(), weights.get(4).getFloat32());
+
+        // Perform matrix-vector multiplication: output = weights @ input
+        for (int i = 0; i < rows; i++) {
+            float sum = 0.0f;
+            for (int j = 0; j < cols; j++) {
+                float weight = weights.get(i * cols + j).getFloat32();
+                float inputVal = input.getFloat(j);
+                sum += weight * inputVal;
+            }
+            output.setFloat(i, sum);
+        }
+
+        System.err.printf("[DIRECT-MATMUL] Completed matrix multiplication%n");
     }
 
     /**
