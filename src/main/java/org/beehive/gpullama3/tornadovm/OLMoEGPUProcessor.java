@@ -204,7 +204,7 @@ public class OLMoEGPUProcessor {
         processInputNormalization(layerInput, layer, weights, config);
 
         // Step 2: Multi-head attention with Q/K normalization
-        FloatArray attentionOutput = processAttentionWithQKNorm(layerInput, layer, position, weights, config);
+        FloatArray attentionOutput = processAttentionWithQKNorm(layerInput, layer, position, weights, config, state);
 
         // Step 3: First residual connection (input + attention)
         addResidualConnection(residualInput, attentionOutput);
@@ -248,7 +248,7 @@ public class OLMoEGPUProcessor {
     }
 
     private FloatArray processAttentionWithQKNorm(FloatArray input, int layer, int position,
-                                                 OlmoeTornadoWeights weights, OlmoeConfiguration config) {
+                                                 OlmoeTornadoWeights weights, OlmoeConfiguration config, OlmoeState state) {
         logger.fine(String.format("[OLMOE-GPU] Layer %d: Attention with Q/K normalization", layer));
 
         // Step 1: Q/K/V projections (standard)
@@ -284,7 +284,7 @@ public class OLMoEGPUProcessor {
 
         // Step 3: Reshape to attention heads and apply attention
         FloatArray attentionOutput = applyMultiHeadAttention(normalizedQuery, normalizedKey, value,
-                                                           layer, position, weights, config);
+                                                           layer, position, weights, config, state);
 
         logger.fine(String.format("[OLMOE-GPU] Layer %d: ✅ Q/K normalization applied", layer));
         return attentionOutput;
@@ -343,16 +343,24 @@ public class OLMoEGPUProcessor {
     }
 
     /**
-     * Select top-k experts based on router logits
+     * Select top-k experts based on router logits (following llama.cpp exactly)
      */
     private void selectTopKExperts(float[] routerLogits, int[] selectedExperts, float[] expertWeights) {
-        // Simple top-k selection with softmax
+        // First apply softmax to all router logits
+        float[] routerProbs = new float[numExperts];
+        System.arraycopy(routerLogits, 0, routerProbs, 0, numExperts);
+        applySoftmax(routerProbs);
+
+        System.out.printf("[OLMOE-ROUTER] Router probs after softmax: [%.6f, %.6f, %.6f, %.6f, %.6f...]%n",
+            routerProbs[0], routerProbs[1], routerProbs[2], routerProbs[3], routerProbs[4]);
+
+        // Select top-k experts based on probabilities
         for (int k = 0; k < topK; k++) {
             int bestExpert = 0;
-            float bestLogit = Float.NEGATIVE_INFINITY;
+            float bestProb = Float.NEGATIVE_INFINITY;
 
             for (int i = 0; i < numExperts; i++) {
-                if (routerLogits[i] > bestLogit) {
+                if (routerProbs[i] > bestProb) {
                     boolean alreadySelected = false;
                     for (int j = 0; j < k; j++) {
                         if (selectedExperts[j] == i) {
@@ -362,17 +370,21 @@ public class OLMoEGPUProcessor {
                     }
                     if (!alreadySelected) {
                         bestExpert = i;
-                        bestLogit = routerLogits[i];
+                        bestProb = routerProbs[i];
                     }
                 }
             }
 
             selectedExperts[k] = bestExpert;
-            expertWeights[k] = bestLogit;
+            expertWeights[k] = bestProb; // Use softmax probability directly, NO further normalization
         }
 
-        // Apply softmax to expert weights
-        applySoftmax(expertWeights);
+        System.out.printf("[OLMOE-ROUTER] Selected experts: [%d, %d, %d, %d, %d, %d, %d, %d]%n",
+            selectedExperts[0], selectedExperts[1], selectedExperts[2], selectedExperts[3],
+            selectedExperts[4], selectedExperts[5], selectedExperts[6], selectedExperts[7]);
+        System.out.printf("[OLMOE-ROUTER] Expert weights (NO normalization): [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]%n",
+            expertWeights[0], expertWeights[1], expertWeights[2], expertWeights[3],
+            expertWeights[4], expertWeights[5], expertWeights[6], expertWeights[7]);
     }
 
     /**
@@ -660,22 +672,8 @@ public class OLMoEGPUProcessor {
     private FloatArray applySwiGLUGPU(FloatArray gate, FloatArray up) {
         FloatArray result = new FloatArray(gate.getSize());
 
-        for (int i = 0; i < gate.getSize(); i++) {
-            float gateVal = gate.get(i);
-            float upVal = up.get(i);
-
-            // SiLU activation: silu(x) = x / (1 + exp(-x))
-            float silu;
-            if (gateVal > 20.0f) {
-                silu = gateVal;
-            } else if (gateVal < -20.0f) {
-                silu = 0.0f;
-            } else {
-                silu = gateVal / (1.0f + (float) Math.exp(-gateVal));
-            }
-
-            result.set(i, silu * upVal);
-        }
+        // Use the real GPU kernel, not CPU computation
+        applySwiGLUGPU(gate, up, result, gate.getSize());
 
         return result;
     }
@@ -722,20 +720,22 @@ public class OLMoEGPUProcessor {
 
     private FloatArray applyMultiHeadAttention(FloatArray query, FloatArray key, FloatArray value,
                                              int layer, int position, OlmoeTornadoWeights weights,
-                                             OlmoeConfiguration config) {
-        // Real GPU multi-head attention implementation
+                                             OlmoeConfiguration config, OlmoeState state) {
+        // FIXED: Proper causal self-attention with KV caching
         int numHeads = config.numberOfHeads();
         int headDim = dim / numHeads;
         float scale = (float) (1.0 / Math.sqrt(headDim));
 
-        // Reshape Q, K, V from [dim] to [numHeads, headDim] conceptually
+        // Access KV cache from state
+        int kvDim = (config.dim() * config.numberOfKeyValueHeads()) / config.numberOfHeads();
+
         FloatArray output = new FloatArray(dim);
 
         // Process each attention head
         for (int h = 0; h < numHeads; h++) {
             int headOffset = h * headDim;
 
-            // Extract head-specific Q, K, V slices
+            // Extract head-specific Q, K, V slices for current position
             FloatArray qHead = new FloatArray(headDim);
             FloatArray kHead = new FloatArray(headDim);
             FloatArray vHead = new FloatArray(headDim);
@@ -746,24 +746,59 @@ public class OLMoEGPUProcessor {
                 vHead.set(i, value.get(headOffset + i));
             }
 
-            // Apply rotary positional embeddings
+            // Apply rotary positional embeddings to current Q and K
             applyRotaryEmbeddings(qHead, kHead, position, headDim);
 
-            // Compute attention score for this position (simplified for single token)
-            float score = 0.0f;
-            for (int i = 0; i < headDim; i++) {
-                score += qHead.get(i) * kHead.get(i);
+            // CRITICAL FIX: Store current K and V in cache at position
+            System.out.printf("[KV-CACHE-DEBUG] Storing layer=%d, position=%d, head=%d%n", layer, position, h);
+            storeInKVCache(state, layer, position, h, kHead, vHead, headDim, config);
+
+            // CRITICAL FIX: Compute attention scores with ALL previous positions (0 to position)
+            float[] attentionScores = new float[position + 1];
+            float maxScore = Float.NEGATIVE_INFINITY;
+
+            // Compute Q * K^T for all cached positions
+            for (int pos = 0; pos <= position; pos++) {
+                float score = 0.0f;
+
+                // Retrieve cached K[pos] from KV cache
+                FloatArray cachedKey = getFromKVCache(state, layer, pos, h, headDim, true, config);
+
+                for (int i = 0; i < headDim; i++) {
+                    score += qHead.get(i) * cachedKey.get(i);
+                }
+
+                score *= scale;
+                attentionScores[pos] = score;
+                maxScore = Math.max(maxScore, score);
             }
-            score *= scale;
 
-            // Apply softmax (for single token, just exp)
-            float attentionWeight = (float) Math.exp(score);
+            // Apply softmax across all positions for numerical stability
+            float sumExp = 0.0f;
+            for (int pos = 0; pos <= position; pos++) {
+                attentionScores[pos] = (float) Math.exp(attentionScores[pos] - maxScore);
+                sumExp += attentionScores[pos];
+            }
 
-            // Apply attention to value and write back to output
+            // Normalize attention weights
+            for (int pos = 0; pos <= position; pos++) {
+                attentionScores[pos] /= sumExp;
+            }
+
+            // Apply attention weights to all cached values
             for (int i = 0; i < headDim; i++) {
-                output.set(headOffset + i, attentionWeight * vHead.get(i));
+                float sum = 0.0f;
+                for (int pos = 0; pos <= position; pos++) {
+                    // Retrieve cached V[pos] from KV cache
+                    FloatArray cachedValue = getFromKVCache(state, layer, pos, h, headDim, false, config);
+                    sum += attentionScores[pos] * cachedValue.get(i);
+                }
+                output.set(headOffset + i, sum);
             }
         }
+
+        System.out.printf("[ATTENTION-FIX] ✅ Applied causal self-attention - layer=%d, position=%d, attending to %d positions%n",
+                          layer, position, position + 1);
 
         // Apply output projection
         HalfFloatArray outputWeights = ((OlmoeTornadoWeights) weights).woLayered[layer];
@@ -771,12 +806,58 @@ public class OLMoEGPUProcessor {
     }
 
     /**
+     * Store key and value in KV cache at specific position
+     */
+    private void storeInKVCache(OlmoeState state, int layer, int position, int head,
+                               FloatArray key, FloatArray value, int headDim, OlmoeConfiguration config) {
+        // Calculate base offset for this layer, position, and head
+        int kvDim = (config.dim() * config.numberOfKeyValueHeads()) / config.numberOfHeads();
+        int baseOffset = layer * config.contextLength() * kvDim + position * kvDim + head * headDim;
+
+        // Store key
+        FloatArray keyCache = (FloatArray) state.wrapKeyCache;
+        for (int i = 0; i < headDim; i++) {
+            keyCache.set(baseOffset + i, key.get(i));
+        }
+
+        // Store value
+        FloatArray valueCache = (FloatArray) state.wrapValueCache;
+        for (int i = 0; i < headDim; i++) {
+            valueCache.set(baseOffset + i, value.get(i));
+        }
+    }
+
+    /**
+     * Retrieve key or value from KV cache at specific position
+     */
+    private FloatArray getFromKVCache(OlmoeState state, int layer, int position, int head,
+                                     int headDim, boolean isKey, OlmoeConfiguration config) {
+        // Calculate base offset for this layer, position, and head
+        int kvDim = (config.dim() * config.numberOfKeyValueHeads()) / config.numberOfHeads();
+        int baseOffset = layer * config.contextLength() * kvDim + position * kvDim + head * headDim;
+
+        FloatArray result = new FloatArray(headDim);
+        FloatArray cache = isKey ? (FloatArray) state.wrapKeyCache : (FloatArray) state.wrapValueCache;
+
+        // Retrieve from cache
+        for (int i = 0; i < headDim; i++) {
+            result.set(i, cache.get(baseOffset + i));
+        }
+
+        return result;
+    }
+
+    /**
      * Apply rotary positional embeddings to query and key tensors
      */
     private void applyRotaryEmbeddings(FloatArray query, FloatArray key, int position, int headDim) {
-        // Simple rotary embeddings implementation
+        // Correct RoPE implementation following standard formula
+        // θ_i = 10000^(-2i/d) where i is the pair index (0 to d/2-1)
         for (int i = 0; i < headDim; i += 2) {
             if (i + 1 < headDim) {
+                // RoPE frequency calculation: θ_j = 10000^(-2j/d) where j is pair index
+                // Since i goes 0,2,4,6... and j should be 0,1,2,3..., we have j = i/2
+                // So θ = 10000^(-2*(i/2)/d) = 10000^(-i/d) - our original formula was correct
                 float freq = (float) (1.0 / Math.pow(10000.0, (double) i / headDim));
                 float angle = position * freq;
                 float cos = (float) Math.cos(angle);
@@ -795,6 +876,8 @@ public class OLMoEGPUProcessor {
                 key.set(i + 1, k0 * sin + k1 * cos);
             }
         }
+
+        System.out.printf("[ROPE-DEBUG] Applied RoPE at position %d to headDim %d%n", position, headDim);
     }
 
     private FloatArray computeRouterLogits(FloatArray input, int layer, OlmoeTornadoWeights weights) {
@@ -1002,6 +1085,7 @@ public class OLMoEGPUProcessor {
      */
     public void processTransformerLayer(int layer, int position,
                                       OlmoeState state, OlmoeTornadoWeights weights, OlmoeConfiguration config) {
+        System.out.printf("[TRANSFORM-LAYER-DEBUG] Layer %d called with position %d%n", layer, position);
         logger.fine(String.format("[OLMOE-GPU] Processing transformer layer %d (position %d) with strategy %s",
                                  layer, position, memoryManager.getStrategy()));
 
@@ -1021,7 +1105,7 @@ public class OLMoEGPUProcessor {
         processInputNormalization(layerInput, layer, weights, config);
 
         // Step 2: Multi-head attention with Q/K normalization using GPU
-        FloatArray attentionOutput = processAttentionWithQKNorm(layerInput, layer, position, weights, config);
+        FloatArray attentionOutput = processAttentionWithQKNorm(layerInput, layer, position, weights, config, state);
 
         // Step 3: First residual connection (input + attention)
         addResidualConnection(residualInput, attentionOutput);
