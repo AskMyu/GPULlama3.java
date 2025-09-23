@@ -249,6 +249,7 @@ public class OLMoEGPUProcessor {
 
     private FloatArray processAttentionWithQKNorm(FloatArray input, int layer, int position,
                                                  OlmoeTornadoWeights weights, OlmoeConfiguration config, OlmoeState state) {
+        System.out.printf("[ATTENTION-DEBUG] Layer %d: Processing attention at position %d%n", layer, position);
         logger.fine(String.format("[OLMOE-GPU] Layer %d: Attention with Q/K normalization", layer));
 
         // Step 1: Q/K/V projections (standard)
@@ -326,6 +327,36 @@ public class OLMoEGPUProcessor {
         FloatArray routerWeights = weights.routerWeightsArray(layer);
         float[] routerLogits = new float[numExperts];
 
+        // DEBUG: Check router weights and input
+        System.err.printf("[ROUTER-DEBUG] Layer %d: Router weight size=%d (expected %d x %d = %d)%n",
+                         layer, routerWeights.getSize(), dim, numExperts, dim * numExperts);
+
+        // Check for zero weights
+        float weightSum = 0.0f;
+        float weightMin = Float.MAX_VALUE;
+        float weightMax = Float.MIN_VALUE;
+        for (int i = 0; i < Math.min(100, routerWeights.getSize()); i++) {
+            float w = routerWeights.get(i);
+            weightSum += Math.abs(w);
+            weightMin = Math.min(weightMin, w);
+            weightMax = Math.max(weightMax, w);
+        }
+        System.err.printf("[ROUTER-DEBUG] Router weights (first 100): sum=%.6f, min=%.6f, max=%.6f%n",
+                         weightSum, weightMin, weightMax);
+
+        // Check input values
+        float inputSum = 0.0f;
+        float inputMin = Float.MAX_VALUE;
+        float inputMax = Float.MIN_VALUE;
+        for (int i = 0; i < Math.min(100, dim); i++) {
+            float v = input.get(i);
+            inputSum += Math.abs(v);
+            inputMin = Math.min(inputMin, v);
+            inputMax = Math.max(inputMax, v);
+        }
+        System.err.printf("[ROUTER-DEBUG] Input values (first 100): sum=%.6f, min=%.6f, max=%.6f%n",
+                         inputSum, inputMin, inputMax);
+
         // Simple matrix multiplication: input * routerWeights
         // CRITICAL FIX: Router weights are stored as [dim, experts] not [experts, dim]
         // Correct indexing: weight[d * numExperts + e] for input[d] → expert[e]
@@ -336,6 +367,20 @@ public class OLMoEGPUProcessor {
             }
             routerLogits[expert] = sum;
         }
+
+        // Debug router logits before softmax
+        float logitSum = 0.0f;
+        float logitMin = Float.MAX_VALUE;
+        float logitMax = Float.MIN_VALUE;
+        for (float logit : routerLogits) {
+            logitSum += Math.abs(logit);
+            logitMin = Math.min(logitMin, logit);
+            logitMax = Math.max(logitMax, logit);
+        }
+        System.err.printf("[ROUTER-DEBUG] Router logits (raw): sum=%.6f, min=%.6f, max=%.6f%n",
+                         logitSum, logitMin, logitMax);
+        System.err.printf("[ROUTER-DEBUG] First 5 logits: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         routerLogits[0], routerLogits[1], routerLogits[2], routerLogits[3], routerLogits[4]);
 
         System.out.printf("[ROUTER-FIX] ✅ Fixed router weight indexing: [dim=%d, experts=%d]%n", dim, numExperts);
 
@@ -351,7 +396,7 @@ public class OLMoEGPUProcessor {
         System.arraycopy(routerLogits, 0, routerProbs, 0, numExperts);
         applySoftmax(routerProbs);
 
-        System.out.printf("[OLMOE-ROUTER] Router probs after softmax: [%.6f, %.6f, %.6f, %.6f, %.6f...]%n",
+        System.out.printf("[OLMOE-ROUTER] Router probs after softmax: [%.9e, %.9e, %.9e, %.9e, %.9e...]%n",
             routerProbs[0], routerProbs[1], routerProbs[2], routerProbs[3], routerProbs[4]);
 
         // Select top-k experts based on probabilities
@@ -880,15 +925,6 @@ public class OLMoEGPUProcessor {
         System.out.printf("[ROPE-DEBUG] Applied RoPE at position %d to headDim %d%n", position, headDim);
     }
 
-    private FloatArray computeRouterLogits(FloatArray input, int layer, OlmoeTornadoWeights weights) {
-        // Real GPU router computation
-        FloatArray routerWeightsArray = weights.routerWeightsArray(layer);
-        float[] routerWeights = new float[routerWeightsArray.getSize()];
-        for (int i = 0; i < routerWeights.length; i++) {
-            routerWeights[i] = routerWeightsArray.get(i);
-        }
-        return matmulGPU(input, routerWeights, dim, numExperts);
-    }
 
     private void processFFNNormalization(FloatArray input, int layer,
                                        OlmoeTornadoWeights weights, OlmoeConfiguration config) {
@@ -1178,8 +1214,8 @@ public class OLMoEGPUProcessor {
             logits.get(0), logits.get(1), logits.get(2), logits.get(3), logits.get(4));
 
         // Apply optimal scaling factor for OLMoE
-        // Raw logits are ±0.002 to ±0.042, need ±1 to ±5 for good softmax distribution
-        float scalingFactor = 20.0f;
+        // Raw logits are ±0.002 to ±0.042, need ±2 to ±10 for confident language model predictions
+        float scalingFactor = 50.0f;
         System.out.printf("[OLMOE-DEBUG] Applying optimal logits scaling factor: %.1f%n", scalingFactor);
 
         for (int i = 0; i < logits.getSize(); i++) {

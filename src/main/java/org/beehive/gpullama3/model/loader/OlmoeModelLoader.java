@@ -768,7 +768,17 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             }
 
             // Convert MoE weights to FloatArrays
-            routerWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_gate_inp.weight"));
+            org.beehive.gpullama3.core.model.tensor.FloatTensor routerTensor = loadedTensors.get("blk." + i + ".ffn_gate_inp.weight");
+            if (routerTensor != null) {
+                System.err.printf("[ROUTER-LOAD] Layer %d: Loading router weights, size=%d%n", i, routerTensor.size());
+                // Check first few values
+                if (routerTensor.size() > 5) {
+                    System.err.printf("[ROUTER-LOAD] Layer %d: First 5 router weights: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                                     i, routerTensor.getFloat(0), routerTensor.getFloat(1),
+                                     routerTensor.getFloat(2), routerTensor.getFloat(3), routerTensor.getFloat(4));
+                }
+            }
+            routerWeights[i] = convertToFloatArray(routerTensor);
             expertGateWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_gate_exps.weight"));
             expertDownWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_down_exps.weight"));
             expertUpWeights[i] = convertToFloatArray(loadedTensors.get("blk." + i + ".ffn_up_exps.weight"));
