@@ -6,6 +6,7 @@ import org.beehive.gpullama3.model.Model;
 import org.beehive.gpullama3.tornadovm.FloatArrayUtils;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import org.beehive.gpullama3.tornadovm.TornadoVMSafeInitializer;
+import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
 
 import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
@@ -55,6 +56,10 @@ public interface Sampler {
      *         if logits are of an unsupported type
      */
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
+        return selectSampler(vocabularySize, temperature, topp, rngSeed, null);
+    }
+
+    static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed, Model model) {
         Sampler sampler;
         if (temperature == 0.0f) {
             // greedy argmax sampling: take the token with the highest probability
@@ -84,6 +89,10 @@ public interface Sampler {
                 if (logits instanceof FloatTensor) {
                     // For CPU path using FloatTensor
                     FloatTensor tensorLogits = (FloatTensor) logits;
+
+                    // CRITICAL DEBUG: Analyze logits distribution before processing
+                    LogitsDebugger.debugLogitsDistribution(tensorLogits, "FloatTensor", model);
+
                     // Apply temperature scaling - lower values make distribution more peaked
                     tensorLogits.divideInPlace(0, tensorLogits.size(), temperature);
                     // Convert logits to probabilities using softmax
@@ -91,6 +100,10 @@ public interface Sampler {
                 } else if (logits instanceof FloatArray) {
                     // For GPU path using FloatArray
                     FloatArray arrayLogits = (FloatArray) logits;
+
+                    // CRITICAL DEBUG: Analyze logits distribution before processing
+                    LogitsDebugger.debugLogitsDistribution(arrayLogits, "FloatArray", model);
+
                     // Apply the same operations but using FloatArray-specific methods for TornadoVM data types
                     FloatArrayUtils.divideInPlace(arrayLogits, 0, arrayLogits.getSize(), temperature);
                     FloatArrayUtils.softmaxInPlace(arrayLogits, 0, arrayLogits.getSize());
@@ -105,7 +118,7 @@ public interface Sampler {
     }
 
     public static Sampler createSampler(Model model, Options options) {
-        return selectSampler(model.configuration().vocabularySize(), options.temperature(), options.topp(), options.seed());
+        return selectSampler(model.configuration().vocabularySize(), options.temperature(), options.topp(), options.seed(), model);
     }
 
     /**
@@ -156,4 +169,5 @@ public interface Sampler {
 
         return maxIndex;
     }
+
 }

@@ -297,15 +297,20 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
         Float rmsNormEps = getFloatFromMetadata(metadata, 
             "olmoe.attention.layer_norm_rms_epsilon", 1e-05f);
         Float ropeTheta = getFloatFromMetadata(metadata, "olmoe.rope.freq_base", 10000.0f);
-        Float routerAuxLossCoef = getFloatFromMetadata(metadata, 
+        Float routerAuxLossCoef = getFloatFromMetadata(metadata,
             "olmoe.router_aux_loss_coef", 0.01f);
-        Boolean outputRouterLogits = getBoolFromMetadata(metadata, 
+        Boolean outputRouterLogits = getBoolFromMetadata(metadata,
             "olmoe.output_router_logits", false);
-        
+
+        // CRITICAL FIX: Load final logit softcapping parameter from GGUF
+        // This matches llama.cpp's LLM_KV_FINAL_LOGIT_SOFTCAPPING key
+        Float finalLogitSoftcapping = getFloatFromMetadata(metadata,
+            "final_logit_softcapping", 30.0f);  // Default matches llama.cpp
+
         return OlmoeConfiguration.create(
             dim, hiddenDim, numberOfLayers, numberOfHeads, numberOfKeyValueHeads,
             vocabularySize, contextLength, numberOfExperts, numberOfActiveExperts,
-            rmsNormEps, ropeTheta, routerAuxLossCoef, outputRouterLogits
+            rmsNormEps, ropeTheta, routerAuxLossCoef, outputRouterLogits, finalLogitSoftcapping
         );
     }
 

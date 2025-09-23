@@ -34,9 +34,10 @@ public class OpenCLMemoryManager {
     private MemoryStrategy selectedStrategy = MemoryStrategy.DYNAMIC_LOADING;
     private boolean initialized = false;
 
-    // OLMoE model memory requirements
-    private static final long EXPERT_WEIGHT_SIZE = 52L * 1024L * 1024L; // ~52MB per expert matrix (worst case)
-    private static final long TOTAL_EXPERT_WEIGHTS = 64L * 3L * EXPERT_WEIGHT_SIZE; // 64 experts × 3 matrices
+    // OLMoE model memory requirements (CORRECTED to match TornadoVMMasterPlan calculation)
+    // Formula: numberOfExperts * config.dim() * config.dim() * 3L * 4L * numberOfLayers
+    // 64 experts × 2048 dim × 2048 dim × 3 tensors × 4 bytes × 16 layers = 48.00 GB
+    private static final long TOTAL_EXPERT_WEIGHTS = 64L * 2048L * 2048L * 3L * 4L * 16L; // Matches TornadoVMMasterPlan
     private static final long BASE_MODEL_MEMORY = 1024L * 1024L * 1024L; // ~1GB base model
     private static final long ACTIVATION_MEMORY = 512L * 1024L * 1024L; // ~512MB activations
     private static final long TOTAL_MODEL_MEMORY = TOTAL_EXPERT_WEIGHTS + BASE_MODEL_MEMORY + ACTIVATION_MEMORY;
@@ -223,6 +224,34 @@ public class OpenCLMemoryManager {
         logger.info(String.format("[OLMOE-MEMORY] Selecting strategy for model size: %.2f GB",
                                  TOTAL_MODEL_MEMORY / (1024.0 * 1024.0 * 1024.0)));
 
+        // CRITICAL FIX: Check if TornadoVMMasterPlan already decided on on-demand loading
+        // This happens when expert memory (48GB) > 80% of available GPU memory (40.79GB)
+        long expertMemory = TOTAL_EXPERT_WEIGHTS;
+        long availableGPUMemory = availableMemory;
+        boolean expertMemoryExceedsThreshold = (expertMemory > availableGPUMemory * 0.8);
+
+        if (expertMemoryExceedsThreshold) {
+            // TornadoVMMasterPlan chose on-demand mode - we must respect this decision
+            selectedStrategy = MemoryStrategy.DYNAMIC_LOADING;
+            logger.info("[OLMOE-MEMORY] 🔄 FORCED DYNAMIC_LOADING strategy (TornadoVMMasterPlan detected memory constraint)");
+            logger.info(String.format("[OLMOE-MEMORY] Expert memory: %.2f GB > 80%% of available: %.2f GB",
+                                     expertMemory / (1024.0 * 1024.0 * 1024.0),
+                                     (availableGPUMemory * 0.8) / (1024.0 * 1024.0 * 1024.0)));
+
+            // Calculate optimal cache size for dynamic loading
+            long cacheMemory = availableMemory - BASE_MODEL_MEMORY - ACTIVATION_MEMORY;
+            long expertWeightSize = 2048L * 2048L * 3L * 4L; // Single expert: dim × dim × 3 tensors × 4 bytes
+            maxCachedExperts = (int) Math.min(32, cacheMemory / expertWeightSize);
+            maxCachedExperts = Math.max(8, maxCachedExperts); // At least 8 experts cached
+
+            logger.info(String.format("[OLMOE-MEMORY] Cache size: %d experts", maxCachedExperts));
+
+            // CRITICAL FIX: Initialize expert cache for forced dynamic loading
+            expertCache = new ExpertCache(maxCachedExperts);
+            logger.info(String.format("[OLMOE-MEMORY] ✅ Initialized expert cache for forced dynamic loading (capacity: %d)", maxCachedExperts));
+            return;
+        }
+
         // Check if we can load all experts in a single allocation
         boolean canLoadAllExperts = (TOTAL_EXPERT_WEIGHTS < maxMemAllocSize);
 
@@ -240,7 +269,8 @@ public class OpenCLMemoryManager {
 
             // Calculate optimal cache size
             long cacheMemory = availableMemory - BASE_MODEL_MEMORY - ACTIVATION_MEMORY;
-            maxCachedExperts = (int) Math.min(32, cacheMemory / (3L * EXPERT_WEIGHT_SIZE));
+            long expertWeightSize = 2048L * 2048L * 3L * 4L; // Single expert: dim × dim × 3 tensors × 4 bytes
+            maxCachedExperts = (int) Math.min(32, cacheMemory / expertWeightSize);
             maxCachedExperts = Math.max(8, maxCachedExperts); // At least 8 experts cached
 
             logger.info(String.format("[OLMOE-MEMORY] ✅ Selected DYNAMIC_LOADING strategy (cache %d experts)",

@@ -67,18 +67,25 @@ public class OlmoChatFormat implements ChatFormat {
 
     @Override
     public List<Integer> encodeHeader(Message message) {
+        System.out.println("[OLMO-CHAT-DEBUG] 🎯 encodeHeader called with role: " + message.role() + ", content: '" + message.content() + "'");
         List<Integer> tokens = new ArrayList<>();
 
         // Start with user/assistant header
         if (message.role() == Role.USER) {
+            System.out.println("[OLMO-CHAT-DEBUG] Adding USER header tokens");
             tokens.addAll(tokenizer.encodeAsList("<|user|>\n"));
         } else if (message.role() == Role.ASSISTANT) {
-            tokens.addAll(tokenizer.encodeAsList("<|assistant|>\n"));
+            System.out.println("[OLMO-CHAT-DEBUG] 🔥 ADDING ASSISTANT HEADER TOKENS!");
+            List<Integer> assistantTokens = tokenizer.encodeAsList("<|assistant|>\n");
+            System.out.println("[OLMO-CHAT-DEBUG] Assistant tokens: " + assistantTokens);
+            tokens.addAll(assistantTokens);
         } else {
+            System.out.println("[OLMO-CHAT-DEBUG] Adding fallback USER header for role: " + message.role());
             // Fallback for system messages
             tokens.addAll(tokenizer.encodeAsList("<|user|>\n"));
         }
 
+        System.out.println("[OLMO-CHAT-DEBUG] encodeHeader returning " + tokens.size() + " tokens: " + tokens);
         return tokens;
     }
 
@@ -110,6 +117,31 @@ public class OlmoChatFormat implements ChatFormat {
             String decoded = tokenizer.decode(List.of(tokenId));
             System.out.printf("[OLMO-CHAT-DEBUG] Token[%d]: %d → '%s'%n", i, tokenId, decoded);
         }
+
+        return tokens;
+    }
+
+    /**
+     * Encodes the conversation including the assistant prompt to trigger model response.
+     * This method should be called when preparing the final prompt for generation.
+     */
+    public List<Integer> encodeConversation(List<Message> messages) {
+        System.out.println("[OLMO-CHAT-DEBUG] 🔍 Encoding conversation with " + messages.size() + " messages");
+
+        List<Integer> tokens = new ArrayList<>();
+
+        // Encode all messages
+        for (Message message : messages) {
+            tokens.addAll(encodeMessage(message));
+        }
+
+        // CRITICAL: Add the assistant prompt to trigger model response
+        List<Integer> assistantPrompt = tokenizer.encodeAsList("<|assistant|>\n");
+        System.out.println("[OLMO-CHAT-DEBUG] 🎯 Adding assistant prompt tokens: " + assistantPrompt);
+        tokens.addAll(assistantPrompt);
+
+        System.out.println("[OLMO-CHAT-DEBUG] ✅ Final conversation tokens count: " + tokens.size());
+        System.out.println("[OLMO-CHAT-DEBUG] 🔍 Final conversation tokens: " + tokens);
 
         return tokens;
     }

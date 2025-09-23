@@ -21,7 +21,8 @@ public record OlmoeConfiguration(int dim,                      // Hidden size: 2
                                  float rmsNormEps,              // 1e-05
                                  float ropeTheta,               // 10000.0
                                  float routerAuxLossCoef,       // 0.01 for load balancing
-                                 boolean outputRouterLogits)    // false by default
+                                 boolean outputRouterLogits,    // false by default
+                                 float finalLogitSoftcapping)   // CRITICAL: Final logit softcapping factor
                                  implements Configuration {
 
     @Override
@@ -76,6 +77,10 @@ public record OlmoeConfiguration(int dim,                      // Hidden size: 2
     public boolean shouldOutputRouterLogits() {
         return outputRouterLogits;
     }
+
+    public float getFinalLogitSoftcapping() {
+        return finalLogitSoftcapping;
+    }
     
     // Static factory method for OLMoE-1B-7B
     public static OlmoeConfiguration createOLMoE1B7B() {
@@ -92,7 +97,8 @@ public record OlmoeConfiguration(int dim,                      // Hidden size: 2
             1e-05f,    // rmsNormEps
             10000.0f,  // ropeTheta
             0.01f,     // routerAuxLossCoef
-            false      // outputRouterLogits
+            false,     // outputRouterLogits
+            30.0f      // CRITICAL: finalLogitSoftcapping (matches llama.cpp default)
         );
     }
     
@@ -101,11 +107,11 @@ public record OlmoeConfiguration(int dim,                      // Hidden size: 2
             int numberOfHeads, int numberOfKeyValueHeads, int vocabularySize,
             int contextLength, int numberOfExperts, int numberOfActiveExperts,
             float rmsNormEps, float ropeTheta, float routerAuxLossCoef,
-            boolean outputRouterLogits) {
+            boolean outputRouterLogits, float finalLogitSoftcapping) {
         return new OlmoeConfiguration(dim, hiddenDim, numberOfLayers, numberOfHeads,
                 numberOfKeyValueHeads, vocabularySize, contextLength, numberOfExperts,
                 numberOfActiveExperts, rmsNormEps, ropeTheta, routerAuxLossCoef,
-                outputRouterLogits);
+                outputRouterLogits, finalLogitSoftcapping);
     }
 }
 // @formatter:on

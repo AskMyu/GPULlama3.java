@@ -206,27 +206,124 @@ public class OlmoTokenizer implements Tokenizer {
 
     @Override
     public String decode(List<Integer> tokens) {
+        return decode(tokens, false, true);
+    }
+
+    /**
+     * Decode tokens with llama.cpp-compatible logic
+     * @param tokens tokens to decode
+     * @param removeSpecial whether to remove special tokens (BOS/EOS)
+     * @param unparseSpecial whether to unparse special tokens
+     * @return decoded text
+     */
+    public String decode(List<Integer> tokens, boolean removeSpecial, boolean unparseSpecial) {
         System.out.println("[OLMO-DECODE-DEBUG] 🔍 Starting decode for tokens: " + tokens);
 
+        if (tokens.isEmpty()) {
+            return "";
+        }
+
+        // Convert to array for easier processing
+        int[] tokenArray = tokens.stream().mapToInt(Integer::intValue).toArray();
+        int nTokens = tokenArray.length;
+        int startIdx = 0;
+
+        // STEP 1: Handle special token removal (matching llama.cpp logic)
+        boolean removeSpace = true; // OLMo uses space prefix like GPT2
+
+        // Remove BOS token if present and removeSpecial is true
+        if (removeSpecial && nTokens > 0 && tokenArray[0] == 50279) { // OLMo EOS token (also used as BOS)
+            removeSpace = false;
+            startIdx = 1;
+            nTokens--;
+            System.out.println("[OLMO-DECODE-DEBUG] Removed BOS token");
+        }
+
+        // Remove EOS token if present and removeSpecial is true
+        if (removeSpecial && nTokens > 0 && tokenArray[startIdx + nTokens - 1] == 50279) {
+            nTokens--;
+            System.out.println("[OLMO-DECODE-DEBUG] Removed EOS token");
+        }
+
+        // STEP 2: Process each token (matching llama.cpp detokenize loop)
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < tokens.size(); i++) {
-            Integer token = tokens.get(i);
-            String tokenStr = vocabulary.get(token);
+
+        for (int i = 0; i < nTokens; i++) {
+            int token = tokenArray[startIdx + i];
+            String tokenStr = tokenToPiece(token, removeSpace, unparseSpecial);
+
             System.out.printf("[OLMO-DECODE-DEBUG] Token[%d]: %d → '%s'%n", i, token, tokenStr);
 
-            if (tokenStr == null) {
-                System.out.printf("[OLMO-DECODE-DEBUG] ❌ NULL vocabulary entry for token %d%n", token);
-                tokenStr = "<UNK>";
-            } else if (tokenStr.isEmpty()) {
-                System.out.printf("[OLMO-DECODE-DEBUG] ⚠️ Empty vocabulary entry for token %d%n", token);
-            }
+            removeSpace = false; // Only remove space from first token
 
-            sb.append(tokenStr);
+            if (tokenStr != null && !tokenStr.isEmpty()) {
+                sb.append(tokenStr);
+            }
         }
 
         String result = sb.toString();
+
+        // STEP 3: Post-process spaces (matching llama.cpp clean_spaces logic)
+        result = cleanSpaces(result);
+
         System.out.println("[OLMO-DECODE-DEBUG] ✅ Final decoded text: '" + result + "'");
         return result;
+    }
+
+    /**
+     * Convert single token to piece (matching llama.cpp token_to_piece)
+     */
+    private String tokenToPiece(int token, boolean removeLeadingSpace, boolean unparseSpecial) {
+        String tokenStr = vocabulary.get(token);
+
+        if (tokenStr == null) {
+            System.out.printf("[OLMO-DECODE-DEBUG] ❌ NULL vocabulary entry for token %d%n", token);
+            return "<UNK>";
+        }
+
+        // Handle special tokens
+        if (!unparseSpecial && isSpecialToken(token)) {
+            return ""; // Don't output special tokens if unparseSpecial is false
+        }
+
+        // Remove leading space if requested (first token processing)
+        if (removeLeadingSpace && tokenStr.startsWith(" ")) {
+            tokenStr = tokenStr.substring(1);
+        }
+
+        return tokenStr;
+    }
+
+
+    /**
+     * Clean spaces around punctuation (matching llama.cpp clean_spaces logic)
+     */
+    private String cleanSpaces(String text) {
+        if (text.length() <= 1) {
+            return text;
+        }
+
+        StringBuilder cleaned = new StringBuilder();
+        char[] chars = text.toCharArray();
+
+        // First pass: remove spaces before punctuation
+        cleaned.append(chars[0]);
+
+        for (int i = 1; i < chars.length; i++) {
+            char current = chars[i];
+            char previous = chars[i - 1];
+
+            // Remove space before punctuation: " ?" → "?", " !" → "!", " ." → ".", " ," → ","
+            if (previous == ' ' && (current == '?' || current == '!' || current == '.' || current == ',')) {
+                // Don't append the space, just append the punctuation
+                cleaned.setLength(cleaned.length() - 1); // Remove the space we just added
+                cleaned.append(current);
+            } else {
+                cleaned.append(current);
+            }
+        }
+
+        return cleaned.toString();
     }
 
     public Vocabulary getVocabulary() {
