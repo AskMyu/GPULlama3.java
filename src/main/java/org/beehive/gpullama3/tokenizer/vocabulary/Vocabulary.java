@@ -19,7 +19,31 @@ public record Vocabulary(String[] tokens, float[] scores, Map<String, Integer> t
     // @formatter:on
 
     public String get(int tokenIndex) {
-        return tokens[tokenIndex];
+        // Debug logging for suspicious token lookups
+        if (tokenIndex == 0) {
+            System.out.printf("[VOCAB-DEBUG] ⚠️ Looking up token 0 (NULL token)%n");
+        }
+
+        if (tokenIndex < 0 || tokenIndex >= tokens.length) {
+            System.out.printf("[VOCAB-DEBUG] ❌ OUT OF BOUNDS: tokenIndex=%d, vocab size=%d%n", tokenIndex, tokens.length);
+            return "<OUT_OF_BOUNDS>";
+        }
+
+        String result = tokens[tokenIndex];
+
+        // Debug logging for problematic results
+        if (result == null) {
+            System.out.printf("[VOCAB-DEBUG] ❌ NULL token at index %d%n", tokenIndex);
+        } else if (result.isEmpty()) {
+            System.out.printf("[VOCAB-DEBUG] ⚠️ Empty token at index %d%n", tokenIndex);
+        }
+
+        // Verbose logging for token 0 and first few tokens
+        if (tokenIndex <= 5) {
+            System.out.printf("[VOCAB-DEBUG] Token[%d] → '%s'%n", tokenIndex, result);
+        }
+
+        return result;
     }
 
     public OptionalInt getIndex(String token) {

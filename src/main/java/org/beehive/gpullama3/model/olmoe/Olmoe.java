@@ -134,20 +134,30 @@ public class Olmoe extends AbstractModel {
     }
 
     @Override
-    public List<Integer> generateTokens(State state, int startPosition, List<Integer> promptTokens, 
+    public List<Integer> generateTokens(State state, int startPosition, List<Integer> promptTokens,
             Set<Integer> stopTokens, int maxTokens, Sampler sampler, boolean echo,
             IntConsumer onTokenGenerated) {
+        // CRITICAL FIX: Clear KV cache before new sequence to prevent context contamination
+        if (state instanceof OlmoeState olmoeState) {
+            olmoeState.clearKVCache();
+        }
+
         // OLMoE-specific token generation with MoE
-        return InferenceEngine.generateTokensOlmoe(this, (OlmoeState) state, startPosition, 
+        return InferenceEngine.generateTokensOlmoe(this, (OlmoeState) state, startPosition,
                 promptTokens, stopTokens, maxTokens, sampler, echo, onTokenGenerated);
     }
 
     @Override
-    public List<Integer> generateTokensGPU(State state, int startPosition, List<Integer> promptTokens, 
+    public List<Integer> generateTokensGPU(State state, int startPosition, List<Integer> promptTokens,
             Set<Integer> stopTokens, int maxTokens, Sampler sampler, boolean echo,
             IntConsumer onTokenGenerated, TornadoVMMasterPlan tornadoVMPlan) {
+        // CRITICAL FIX: Clear KV cache before new sequence to prevent context contamination
+        if (state instanceof OlmoeState olmoeState) {
+            olmoeState.clearKVCache();
+        }
+
         // OLMoE-specific GPU token generation
-        return InferenceEngine.generateTokensGPUOlmoe(this, (OlmoeState) state, startPosition, 
+        return InferenceEngine.generateTokensGPUOlmoe(this, (OlmoeState) state, startPosition,
                 promptTokens, stopTokens, maxTokens, sampler, echo, onTokenGenerated, tornadoVMPlan);
     }
     

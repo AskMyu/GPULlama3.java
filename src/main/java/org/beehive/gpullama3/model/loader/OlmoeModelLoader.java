@@ -18,6 +18,7 @@ import org.beehive.gpullama3.model.format.ChatFormat.ChatTokens;
 import org.beehive.gpullama3.model.olmoe.Olmoe;
 import org.beehive.gpullama3.model.olmoe.OlmoeConfiguration;
 import org.beehive.gpullama3.tokenizer.impl.GptNeoXTokenizer;
+import org.beehive.gpullama3.tokenizer.impl.OlmoTokenizer;
 import org.beehive.gpullama3.tokenizer.impl.Tokenizer;
 import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
 import org.beehive.gpullama3.model.loader.batch.BatchCapableModelLoader;
@@ -207,9 +208,20 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
 
             // Load OLMoE-specific vocabulary
             Vocabulary vocabulary = loadOlmoeVocabulary(metadata);
-            
-            // Create tokenizer - OLMoE uses allenai/gpt-neox-olmo-dolma-v1_5 (GPT-NeoX style)
-            Tokenizer tokenizer = new GptNeoXTokenizer(metadata, vocabulary);
+
+            // Detect tokenizer type from GGUF metadata
+            String tokenizerPreType = (String) metadata.get("tokenizer.ggml.pre");
+            System.out.println("[OLMOE-TOKENIZER-DETECTION] tokenizer.ggml.pre = " + tokenizerPreType);
+
+            // Create appropriate tokenizer based on metadata
+            Tokenizer tokenizer;
+            if ("olmo".equals(tokenizerPreType)) {
+                System.out.println("[OLMOE-TOKENIZER] Creating OLMo tokenizer (GPT2-style pattern with OLMo vocabulary)");
+                tokenizer = new OlmoTokenizer(metadata, vocabulary);
+            } else {
+                System.out.println("[OLMOE-TOKENIZER] Fallback to GPT-NeoX tokenizer");
+                tokenizer = new GptNeoXTokenizer(metadata, vocabulary);
+            }
 
             // Get context length from metadata
             int modelContextLength = getContextLength(metadata);
@@ -232,7 +244,19 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             ChatFormat chatFormat;
             if (isInstructModel(metadata)) {
                 System.err.println("[OLMOE-CHAT-FORMAT] Detected Instruct model - using Tulu chat template");
-                chatFormat = ChatFormat.createOLMoETulu((GptNeoXTokenizer) tokenizer);
+                if (tokenizer instanceof GptNeoXTokenizer) {
+                    chatFormat = ChatFormat.createOLMoETulu((GptNeoXTokenizer) tokenizer);
+                } else {
+                    // For OlmoTokenizer, create generic chat format with Tulu tokens
+                    ChatTokens chatTokens = new ChatTokens(
+                        "<|user|>",          // tStartHeader: Correct Tulu format start header
+                        "<|assistant|>",     // tEndHeader: Correct Tulu format end header
+                        "",                  // tEndOfTurn: Assistant prefix
+                        "<|endoftext|>",     // tEndOfText: End of text
+                        "<|endoftext|>"      // tEndOfTextFim: End of text FIM
+                    );
+                    chatFormat = ChatFormat.create(tokenizer, chatTokens);
+                }
             } else {
                 System.err.println("[OLMOE-CHAT-FORMAT] Base model detected - using generic format");
                 ChatTokens chatTokens = new ChatTokens(

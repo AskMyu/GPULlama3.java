@@ -7,6 +7,7 @@ import org.beehive.gpullama3.tokenizer.impl.Qwen3Tokenizer;
 import org.beehive.gpullama3.tokenizer.impl.GemmaTokenizer;
 import org.beehive.gpullama3.tokenizer.impl.Cl100kTokenizer;
 import org.beehive.gpullama3.tokenizer.impl.GptNeoXTokenizer;
+import org.beehive.gpullama3.tokenizer.impl.OlmoTokenizer;
 
 import java.util.List;
 import java.util.Set;
@@ -22,6 +23,7 @@ public interface ChatFormat {
             case GemmaTokenizer gemmaTokenizer -> new GemmaChatFormat(gemmaTokenizer);
             case Cl100kTokenizer cl100kTokenizer -> new Cl100kChatFormat(cl100kTokenizer);
             case GptNeoXTokenizer gptNeoXTokenizer -> new GptNeoXChatFormat(gptNeoXTokenizer);
+            case OlmoTokenizer olmoTokenizer -> new OlmoChatFormat(olmoTokenizer);
             default -> throw new IllegalArgumentException("Unsupported tokenizer type: " + tokenizer.getClass().getName());
         };
     }

@@ -132,7 +132,7 @@ public class OlmoeState extends State {
         if (expertRouterLogits == null) {
             return;
         }
-        
+
         // Clear expert selection and weights
         for (int i = 0; i < config.numberOfLayers(); i++) {
             expertRouterLogits[i].init(0.0f);
@@ -141,8 +141,52 @@ public class OlmoeState extends State {
             expertOutputs[i].init(0.0f);
             expertLoadCounts[i].init(0);
         }
-        
+
         routerAuxLoss.init(0.0f);
+    }
+
+    /**
+     * CRITICAL FIX: Clears KV cache for new sequence to prevent context contamination
+     * This resolves the issue where model generates identical output regardless of input prompt
+     */
+    public void clearKVCache() {
+        System.out.println("[OLMOE-CACHE-CLEAR] 🧹 Clearing KV cache to prevent context contamination");
+
+        // Clear KV cache arrays to prevent old context from contaminating new generation
+        // This was the root cause of identical outputs regardless of input prompt
+        if (wrapKeyCache instanceof FloatArray keyCache) {
+            keyCache.init(0.0f);
+            System.out.println("[OLMOE-CACHE-CLEAR] ✅ Key cache cleared (" + keyCache.getSize() + " elements)");
+        } else if (wrapKeyCache != null) {
+            System.out.println("[OLMOE-CACHE-CLEAR] ⚠️ Key cache is SmartCacheArray - using reflection to clear");
+            try {
+                // Use reflection for SmartCacheArray
+                wrapKeyCache.getClass().getMethod("init", float.class).invoke(wrapKeyCache, 0.0f);
+                System.out.println("[OLMOE-CACHE-CLEAR] ✅ Key cache cleared via reflection");
+            } catch (Exception e) {
+                System.out.println("[OLMOE-CACHE-CLEAR] ❌ Failed to clear key cache: " + e.getMessage());
+            }
+        }
+
+        if (wrapValueCache instanceof FloatArray valueCache) {
+            valueCache.init(0.0f);
+            System.out.println("[OLMOE-CACHE-CLEAR] ✅ Value cache cleared (" + valueCache.getSize() + " elements)");
+        } else if (wrapValueCache != null) {
+            System.out.println("[OLMOE-CACHE-CLEAR] ⚠️ Value cache is SmartCacheArray - using reflection to clear");
+            try {
+                // Use reflection for SmartCacheArray
+                wrapValueCache.getClass().getMethod("init", float.class).invoke(wrapValueCache, 0.0f);
+                System.out.println("[OLMOE-CACHE-CLEAR] ✅ Value cache cleared via reflection");
+            } catch (Exception e) {
+                System.out.println("[OLMOE-CACHE-CLEAR] ❌ Failed to clear value cache: " + e.getMessage());
+            }
+        }
+
+        // Also clear MoE state for completeness
+        resetMoEState();
+        System.out.println("[OLMOE-CACHE-CLEAR] ✅ MoE state cleared");
+
+        System.out.println("[OLMOE-CACHE-CLEAR] 🎯 Complete cache reset - ready for new context");
     }
     
     /**

@@ -360,6 +360,7 @@ public final class InferenceEngine {
             currentToken = promptTokens.get(promptIndex);
             System.err.printf("[OLMOE-PROMPT-FIX] Set currentToken to current prompt token: %d at promptIndex=%d, pos=%d%n",
                              currentToken, promptIndex, pos);
+            // NOTE: promptIndex will be incremented in the main loop, not here
         } else {
             // Other models: Use existing logic (state.latestToken)
             currentToken = state.latestToken;
@@ -669,20 +670,11 @@ public final class InferenceEngine {
         int promptIndex = 0;
         int pos = startPosition;
 
-        // Fix prompt processing for OLMoE models
-        int currentToken;
+        // Use standard prompt processing for all models (including OLMoE)
+        int currentToken = state.latestToken;
         boolean isOlmoeModel = model.getClass().getSimpleName().equals("Olmoe");
-        if (isOlmoeModel && promptIndex < promptTokens.size()) {
-            // OLMoE: Use the current prompt token for the current position
-            currentToken = promptTokens.get(promptIndex);
-            System.err.printf("[OLMOE-GPU-PROMPT-FIX] Set currentToken to current prompt token: %d at promptIndex=%d, pos=%d%n",
-                             currentToken, promptIndex, pos);
-        } else {
-            // Other models: Use existing logic (state.latestToken)
-            currentToken = state.latestToken;
-            System.err.printf("[GPU-PROMPT-DEBUG] Model: %s, using state.latestToken: %d%n",
-                             model.getClass().getSimpleName(), currentToken);
-        }
+        System.err.printf("[GPU-PROMPT-DEBUG] Model: %s, using standard prompt processing, latestToken: %d%n",
+                         model.getClass().getSimpleName(), currentToken);
 
         // Use more efficient direct array access for prompt tokens if possible
         int[] promptTokenArray = null;
@@ -710,6 +702,19 @@ public final class InferenceEngine {
             if (promptIndex < promptTokens.size()) {
                 // Get next prompt token (using array access if available)
                 nextToken = promptTokenArray != null ? promptTokenArray[promptIndex++] : promptTokens.get(promptIndex++);
+
+                // CRITICAL DEBUG: Detailed token analysis
+                System.err.printf("[TOKEN-DEBUG] 🔍 Retrieved token[%d]: %d%n", promptIndex - 1, nextToken);
+                String decodedToken = model.tokenizer().decode(List.of(nextToken));
+                System.err.printf("[TOKEN-DEBUG] 🔍 Decoded token[%d]: '%s'%n", promptIndex - 1, decodedToken);
+
+                // Check for NULL/empty tokens
+                if (nextToken == 0) {
+                    System.err.printf("[TOKEN-DEBUG] ❌ CRITICAL: Found NULL token (0) at position %d%n", promptIndex - 1);
+                }
+                if (decodedToken == null || decodedToken.isEmpty()) {
+                    System.err.printf("[TOKEN-DEBUG] ❌ CRITICAL: Token %d decodes to empty/null string%n", nextToken);
+                }
 
                 if (echo) {
                     // Decode and output token
