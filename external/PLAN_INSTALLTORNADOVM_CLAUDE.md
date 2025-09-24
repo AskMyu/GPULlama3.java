@@ -9,7 +9,7 @@ This plan is designed for Claude Code to execute directly. Each phase contains s
 
 ## Executive Summary
 
-Install TornadoVM 1.1.1 from source (`./tornadovm-local-src/`) into local directory (`./tornadovm-local/`). The installation provides GPU acceleration APIs and native libraries with **both OpenCL and PTX backends** for maximum compatibility. PTX backend requires CUDA <= 11.x (CUDA 12+ not supported).
+Install TornadoVM 1.1.1 from source (`./tornadovm-local-src/`) into local directory (`./tornadovm-local/`). The installation provides GPU acceleration APIs and native libraries with **both OpenCL and PTX backends** for maximum compatibility. PTX backend requires CUDA <= 11.x (CUDA 12+ not supported). **Includes critical GraalVM module compatibility fixes for Java 21.**
 
 **Working Directory:** Current directory (`./`) is the main project directory containing the TornadoVM installation.
 
@@ -381,6 +381,11 @@ cp bin/tornado-test ../tornadovm-local/bin/
 cp bin/*.py ../tornadovm-local/bin/ 2>/dev/null || true
 chmod +x ../tornadovm-local/bin/tornado*
 
+# Copy GraalVM JARs for module path (CRITICAL for GraalVM compatibility)
+echo "Copying GraalVM JARs for proper module configuration..."
+cp -r graalJars ../tornadovm-local/bin/sdk/share/java/
+ls -la ../tornadovm-local/bin/sdk/share/java/graalJars/
+
 # Ensure SDK directory is self-contained with proper permissions
 chmod -R u+rwX,go+rX ../tornadovm-local/bin/sdk/
 
@@ -438,6 +443,15 @@ export JAVA_LIBRARY_PATH="$TORNADO_ROOT/lib/native:${JAVA_LIBRARY_PATH:-}"
 export TORNADO_JVM_FLAGS="-XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI"
 export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS -Djava.library.path=$JAVA_LIBRARY_PATH"
 
+# Add essential module exports for GraalVM compatibility (fixes IllegalAccessError)
+export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS --add-exports jdk.internal.vm.compiler/org.graalvm.compiler.lir.framemap=tornado.drivers.opencl"
+export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS --add-exports jdk.internal.vm.compiler/org.graalvm.compiler.lir.framemap=tornado.runtime"
+export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS --add-exports jdk.internal.vm.compiler/org.graalvm.compiler.lir.framemap=ALL-UNNAMED"
+export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS --add-exports jdk.internal.vm.ci/jdk.vm.ci.meta=ALL-UNNAMED"
+export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS --add-exports jdk.internal.vm.ci/jdk.vm.ci.code=ALL-UNNAMED"
+export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS --add-exports jdk.internal.vm.compiler/org.graalvm.compiler.nodes=ALL-UNNAMED"
+export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS --add-exports jdk.internal.vm.compiler/org.graalvm.compiler.core.common=ALL-UNNAMED"
+
 # Set classpath for TornadoVM JARs
 TORNADO_CLASSPATH="$TORNADO_ROOT/lib/*"
 export TORNADO_JVM_FLAGS="$TORNADO_JVM_FLAGS -cp $TORNADO_CLASSPATH"
@@ -471,9 +485,41 @@ EOF
 chmod +x ../tornadovm-local/etc/setvars.sh
 ```
 
-## Phase 4: Installation Verification
+## Phase 4: Post-Installation Configuration Fixes
 
-### Step 4.1: Test Self-Contained Installation
+### Step 4.1: Fix GraalVM Module Access Issues
+
+```bash
+cd ..
+
+# Fix opencl-exports for GraalVM compatibility (prevents IllegalAccessError)
+echo "Adding GraalVM module access fix to opencl-exports..."
+echo "--add-opens jdk.internal.vm.compiler/org.graalvm.compiler.lir.framemap=tornado.drivers.opencl" >> ./tornadovm-local/bin/sdk/etc/exportLists/opencl-exports
+
+# Verify the fix was added
+tail -3 ./tornadovm-local/bin/sdk/etc/exportLists/opencl-exports
+```
+
+### Step 4.2: Fix Backend Configuration Format
+
+```bash
+# Fix tornado.backend file format (required for tornado Python script)
+echo "Fixing tornado.backend configuration format..."
+
+# Check current format
+cat ./tornadovm-local/bin/sdk/etc/tornado.backend
+
+# Update to correct format if needed
+echo "tornado.backends=opencl-backend" > ./tornadovm-local/bin/sdk/etc/tornado.backend
+
+# Verify the fix
+cat ./tornadovm-local/bin/sdk/etc/tornado.backend
+echo "Backend configuration fixed"
+```
+
+## Phase 5: Installation Verification
+
+### Step 5.1: Test Self-Contained Installation
 
 ```bash
 cd ..
@@ -491,16 +537,16 @@ echo "Installation structure:"
 find ./tornadovm-local -type f | head -30
 ```
 
-### Step 4.2: Run Basic Test
+### Step 5.2: Run Basic Test
 
 ```bash
 # Try running a simple test
 timeout 30 tornado -m tornado.examples/uk.ac.manchester.tornado.examples.compute.MatrixMultiplication2D 256 2>/dev/null || echo "Example test completed"
 ```
 
-## Phase 5: Create Documentation and Verification Tools
+## Phase 6: Create Documentation and Verification Tools
 
-### Step 5.1: Create Verification Script
+### Step 6.1: Create Verification Script
 
 ```bash
 cat > ./verify-tornadovm.sh << 'EOF'
@@ -563,7 +609,7 @@ EOF
 chmod +x ./verify-tornadovm.sh
 ```
 
-### Step 5.2: Create Usage Documentation
+### Step 6.2: Create Usage Documentation
 
 ```bash
 cat > ./TORNADOVM_USAGE.md << 'EOF'
@@ -634,6 +680,8 @@ tornado --jvm="-Dtornado.debug=true" --devices
 - **PTX backend issues**: Verify CUDA <= 11.x and nvidia drivers
 - **Native library errors**: Check LD_LIBRARY_PATH in setvars.sh
 - **JVM crashes**: Ensure Java 21 and proper JVM configuration
+- **IllegalAccessError**: If you see "org.graalvm.compiler.lir.framemap.FrameMap$ReferenceMapBuilderFactory" error, ensure Phase 4 configuration fixes were applied
+- **tornado command fails**: Verify tornado.backend file has correct format "tornado.backends=opencl-backend"
 
 ### Backend Compatibility
 - **OpenCL**: Works with NVIDIA, AMD, Intel GPUs
@@ -642,9 +690,9 @@ tornado --jvm="-Dtornado.debug=true" --devices
 EOF
 ```
 
-## Phase 6: Final Installation Summary
+## Phase 7: Final Installation Summary
 
-### Step 6.1: Create Installation Summary
+### Step 7.1: Create Installation Summary
 
 ```bash
 cat > ./TORNADOVM_INSTALLATION_SUMMARY.md << 'EOF'
