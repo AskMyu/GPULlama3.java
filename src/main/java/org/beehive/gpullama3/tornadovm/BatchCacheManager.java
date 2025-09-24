@@ -255,9 +255,14 @@ public class BatchCacheManager {
                       keyBatch, srcKey, valueBatch, srcValue,
                       createIntArray(localKeyIndex), kvDim, 0, 0)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, keyBatch, valueBatch);
-            
-            try (TornadoExecutionPlan plan = TornadoVMSafeInitializer.createExecutionPlanSafely(taskGraph.snapshot())) {
+
+            // CRITICAL FIX: Use freeBuffersOnly() instead of try-with-resources to avoid device reset
+            TornadoExecutionPlan plan = TornadoVMSafeInitializer.createExecutionPlanSafely(taskGraph.snapshot());
+            try {
                 plan.execute();
+            } finally {
+                // Clean up GPU buffers without device reset
+                plan.freeBuffersOnly();
             }
             
         } catch (Exception e) {
@@ -298,9 +303,14 @@ public class BatchCacheManager {
                       q, keyCache.getDirectArray(), valueCache.getDirectArray(), xb,
                       nHeads, headSize, kvDim, kvMul, position, layer, contextLength)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, xb);
-            
-            try (TornadoExecutionPlan plan = TornadoVMSafeInitializer.createExecutionPlanSafely(taskGraph.snapshot())) {
+
+            // CRITICAL FIX: Use freeBuffersOnly() instead of try-with-resources to avoid device reset
+            TornadoExecutionPlan plan = TornadoVMSafeInitializer.createExecutionPlanSafely(taskGraph.snapshot());
+            try {
                 plan.execute();
+            } finally {
+                // Clean up GPU buffers without device reset
+                plan.freeBuffersOnly();
             }
             
         } catch (Exception e) {

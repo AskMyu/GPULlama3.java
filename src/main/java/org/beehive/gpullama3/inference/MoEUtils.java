@@ -16,13 +16,87 @@ public final class MoEUtils {
     }
 
     /**
-     * Selects top-K experts based on router logits using greedy selection.
+     * Applies softmax normalization to all router logits.
+     * This is CRITICAL for correct MoE routing - must be done BEFORE expert selection.
      *
-     * @param routerLogits Array of logits for all experts [numExperts]
-     * @param k Number of experts to select (e.g., 8 for OLMoE)
-     * @return Array of selected expert indices, sorted by score descending
+     * @param routerLogits Raw router logits for all experts [numExperts]
+     * @return Softmax probabilities for all experts [numExperts]
      */
-    public static int[] selectTopKExperts(float[] routerLogits, int k) {
+    public static float[] applySoftmaxToAll(float[] routerLogits) {
+        if (routerLogits == null || routerLogits.length == 0) {
+            throw new IllegalArgumentException("Router logits cannot be null or empty");
+        }
+
+        // Find max for numerical stability
+        float maxLogit = Float.NEGATIVE_INFINITY;
+        for (float logit : routerLogits) {
+            maxLogit = Math.max(maxLogit, logit);
+        }
+
+        // Compute exp(logit - max) and sum
+        float[] probs = new float[routerLogits.length];
+        float sum = 0.0f;
+        for (int i = 0; i < routerLogits.length; i++) {
+            probs[i] = (float) Math.exp(routerLogits[i] - maxLogit);
+            sum += probs[i];
+        }
+
+        // Normalize to get probabilities
+        for (int i = 0; i < probs.length; i++) {
+            probs[i] /= sum;
+        }
+
+        return probs;
+    }
+
+    /**
+     * Selects top-K experts based on softmax probabilities (CORRECTED FLOW).
+     * CRITICAL: This must receive probabilities from applySoftmaxToAll(), not raw logits.
+     *
+     * @param expertProbs Array of softmax probabilities for all experts [numExperts]
+     * @param k Number of experts to select (e.g., 8 for OLMoE)
+     * @return Array of selected expert indices, sorted by probability descending
+     */
+    public static int[] selectTopKExperts(float[] expertProbs, int k) {
+        if (expertProbs == null || expertProbs.length == 0) {
+            throw new IllegalArgumentException("Expert probabilities cannot be null or empty");
+        }
+        if (k <= 0 || k > expertProbs.length) {
+            throw new IllegalArgumentException("k must be between 1 and " + expertProbs.length);
+        }
+
+        // Create array of (index, probability) pairs
+        ExpertScore[] expertScores = new ExpertScore[expertProbs.length];
+        for (int i = 0; i < expertProbs.length; i++) {
+            expertScores[i] = new ExpertScore(i, expertProbs[i]);
+        }
+
+        // Sort by probability descending (corrected from raw logits)
+        Arrays.sort(expertScores, (a, b) -> Float.compare(b.score, a.score));
+
+        // Extract top-K expert indices
+        int[] selectedExperts = new int[k];
+        for (int i = 0; i < k; i++) {
+            selectedExperts[i] = expertScores[i].index;
+        }
+
+        return selectedExperts;
+    }
+
+    /**
+     * LEGACY METHOD: Selects top-K experts based on raw router logits.
+     * DEPRECATED: Use selectTopKExperts(float[] expertProbs, int k) with softmax probabilities.
+     *
+     * This method is maintained for backward compatibility but should NOT be used
+     * for correct MoE routing as it bypasses the critical softmax-before-selection flow.
+     *
+     * @param routerLogits Array of raw logits for all experts [numExperts]
+     * @param k Number of experts to select
+     * @return Array of selected expert indices
+     * @deprecated Use the corrected flow: applySoftmaxToAll() -> selectTopKExperts()
+     */
+    @Deprecated
+    public static int[] selectTopKExpertsFromLogits(float[] routerLogits, int k) {
         if (routerLogits == null || routerLogits.length == 0) {
             throw new IllegalArgumentException("Router logits cannot be null or empty");
         }
@@ -49,13 +123,44 @@ public final class MoEUtils {
     }
 
     /**
-     * Computes expert weights using softmax normalization for selected experts.
+     * Extracts expert weights from full softmax distribution (CORRECTED FLOW).
+     * CRITICAL: Uses weights from full softmax, preserving relative expert importance.
+     * Does NOT renormalize, maintaining llama.cpp-compatible behavior.
+     *
+     * @param fullSoftmaxProbs Full softmax probabilities for all experts [numExperts]
+     * @param selectedExperts Array of selected expert indices [k]
+     * @return Expert weights for selected experts [k] (NOT renormalized)
+     */
+    public static float[] computeExpertWeights(float[] fullSoftmaxProbs, int[] selectedExperts) {
+        if (fullSoftmaxProbs == null || selectedExperts == null) {
+            throw new IllegalArgumentException("Inputs cannot be null");
+        }
+
+        float[] expertWeights = new float[selectedExperts.length];
+
+        // Extract weights from full softmax distribution (CORRECTED - no renormalization!)
+        for (int i = 0; i < selectedExperts.length; i++) {
+            int expertIndex = selectedExperts[i];
+            if (expertIndex < 0 || expertIndex >= fullSoftmaxProbs.length) {
+                throw new IllegalArgumentException("Expert index out of bounds: " + expertIndex);
+            }
+            expertWeights[i] = fullSoftmaxProbs[expertIndex];
+        }
+
+        return expertWeights;
+    }
+
+    /**
+     * LEGACY METHOD: Computes expert weights using softmax normalization for selected experts.
+     * DEPRECATED: This method incorrectly renormalizes weights, breaking llama.cpp compatibility.
      *
      * @param routerLogits Full router logits array [numExperts]
      * @param selectedExperts Array of selected expert indices [k]
      * @return Normalized weights for selected experts [k]
+     * @deprecated Use computeExpertWeights(float[] fullSoftmaxProbs, int[] selectedExperts)
      */
-    public static float[] computeExpertWeights(float[] routerLogits, int[] selectedExperts) {
+    @Deprecated
+    public static float[] computeExpertWeightsFromLogits(float[] routerLogits, int[] selectedExperts) {
         if (routerLogits == null || selectedExperts == null) {
             throw new IllegalArgumentException("Inputs cannot be null");
         }
@@ -76,7 +181,7 @@ public final class MoEUtils {
             sumExp += expertWeights[i];
         }
 
-        // Normalize
+        // Normalize (THIS IS THE PROBLEM - breaks relative importance!)
         if (sumExp > 0.0f) {
             for (int i = 0; i < expertWeights.length; i++) {
                 expertWeights[i] /= sumExp;
@@ -381,6 +486,47 @@ public final class MoEUtils {
 
         // Normalize by number of experts
         return sumSquares / routerLogits.length;
+    }
+
+    /**
+     * CORRECTED MoE EXPERT SELECTION FLOW - Complete implementation matching llama.cpp
+     *
+     * This method implements the corrected expert selection flow that matches llama.cpp:
+     * 1. Apply softmax to ALL expert logits (preserves context)
+     * 2. Select top-K experts based on softmax probabilities
+     * 3. Extract weights without renormalization (maintains relative importance)
+     *
+     * This fixes the critical bug where softmax was applied AFTER selection,
+     * which broke expert routing and caused context-independent gibberish.
+     *
+     * @param routerLogits Raw router logits for all experts [numExperts]
+     * @param k Number of experts to select (e.g., 8 for OLMoE)
+     * @return ExpertSelection containing selected indices and their correct weights
+     */
+    public static ExpertSelection selectExpertsCorrectFlow(float[] routerLogits, int k) {
+        // Step 1: Apply softmax to ALL experts (CRITICAL for context preservation)
+        float[] fullSoftmaxProbs = applySoftmaxToAll(routerLogits);
+
+        // Step 2: Select top-K experts based on softmax probabilities
+        int[] selectedExperts = selectTopKExperts(fullSoftmaxProbs, k);
+
+        // Step 3: Extract weights from full distribution (NO renormalization!)
+        float[] expertWeights = computeExpertWeights(fullSoftmaxProbs, selectedExperts);
+
+        return new ExpertSelection(selectedExperts, expertWeights);
+    }
+
+    /**
+     * Helper class to return expert selection results.
+     */
+    public static class ExpertSelection {
+        public final int[] expertIndices;
+        public final float[] expertWeights;
+
+        public ExpertSelection(int[] expertIndices, float[] expertWeights) {
+            this.expertIndices = expertIndices;
+            this.expertWeights = expertWeights;
+        }
     }
 
     /**

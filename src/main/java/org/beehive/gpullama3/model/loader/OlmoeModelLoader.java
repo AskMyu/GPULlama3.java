@@ -111,38 +111,38 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             System.err.println("[OLMOE-TENSOR-DEBUG] Using 'output.weight'");
         }
 
-        // CRITICAL FIX: Check if token_embd contains negative zeros (tied embeddings indicator)
-        boolean tokenEmbedCorrupted = false;
+        // CRITICAL FIX: OLMoE DOES use tied embeddings - token_embd contains negative zeros as signal
+        // llama.cpp handles this by using output.weight when token_embd is filled with negative zeros
+        // This matches the pattern found in logs where sum=0.000000 and negZeros=100
+        System.err.println("[OLMOE-TIED-EMBEDDINGS] Checking for tied embeddings pattern in token_embd.weight");
+
         if (tokenEmbeddings != null) {
-            // Check for the 00 80 pattern (F16 negative zeros) that indicates tied embeddings
+            // Check for tied embeddings pattern: negative zeros filling the tensor
             float embSum = 0.0f;
             int negativeZeroCount = 0;
             for (int i = 0; i < Math.min(1000, tokenEmbeddings.size()); i++) {
                 float val = tokenEmbeddings.getFloat(i);
                 embSum += Math.abs(val);
-                // Check for negative zero pattern (00 80 in F16 = -0.0)
                 if (val == -0.0f || Float.floatToIntBits(val) == 0x80000000) {
                     negativeZeroCount++;
                 }
             }
 
-            // If token_embd is mostly negative zeros, OLMoE uses tied embeddings
-            if (embSum < 0.0001f || negativeZeroCount > 500) {
-                tokenEmbedCorrupted = true;
-                System.err.printf("[OLMOE-TIED-EMBEDDINGS] token_embd.weight contains %d negative zeros, sum=%.6f - TIED EMBEDDINGS DETECTED!%n",
-                                negativeZeroCount, embSum);
-                System.err.println("[OLMOE-FIX] Using output.weight as token embeddings (tied embeddings pattern)");
+            System.err.printf("[OLMOE-TIED-EMBEDDINGS] token_embd.weight sum=%.6f, negZeros=%d%n", embSum, negativeZeroCount);
 
-                // CRITICAL FIX: Use output.weight as token embeddings
+            // If token_embd contains mostly negative zeros, use tied embeddings (output.weight)
+            if (embSum < 0.0001f || negativeZeroCount > Math.min(500, tokenEmbeddings.size() / 2)) {
+                System.err.println("[OLMOE-TIED-EMBEDDINGS] ✅ DETECTED: token_embd filled with negative zeros - using tied embeddings");
+                System.err.println("[OLMOE-TIED-EMBEDDINGS] Using output.weight as token embeddings (matches llama.cpp behavior)");
+
                 if (outputWeight != null) {
                     tokenEmbeddings = outputWeight;
-                    System.err.println("[OLMOE-FIX] Successfully replaced token_embd.weight with output.weight");
+                    System.err.println("[OLMOE-TIED-EMBEDDINGS] ✅ Successfully using output.weight as token embeddings");
                 } else {
-                    throw new IllegalArgumentException("CRITICAL: token_embd corrupted and no output.weight found!");
+                    throw new IllegalArgumentException("CRITICAL: token_embd has tied embeddings pattern but no output.weight found!");
                 }
             } else {
-                System.err.printf("[OLMOE-EMBEDDINGS-OK] token_embd.weight sum = %.6f, negZeros = %d (normal embeddings)%n",
-                                embSum, negativeZeroCount);
+                System.err.printf("[OLMOE-TIED-EMBEDDINGS] Using separate token embeddings (sum=%.6f, negZeros=%d)%n", embSum, negativeZeroCount);
             }
         }
 
@@ -411,8 +411,8 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             System.err.println("[OLMOE-LOADER] Using 'output.weight' tensor entry");
         }
 
-        // CRITICAL FIX: Check for tied embeddings pattern in tensor entries too
-        boolean tensorEmbedCorrupted = false;
+        // CRITICAL FIX: Check for tied embeddings pattern in tensor entries
+        boolean tokenEmbedCorrupted = false;
         if (tokenEmbeddings != null && outputWeight != null) {
             // Quick check for negative zero pattern by loading first few values
             FloatTensor tokenTensor = loadQuantized(tokenEmbeddings);
@@ -427,10 +427,13 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             }
 
             if (embSum < 0.0001f || negativeZeroCount > 50) {
-                tensorEmbedCorrupted = true;
-                System.err.printf("[OLMOE-TENSOR-ENTRY-TIED] token_embd tensor entry corrupted (sum=%.6f, negZeros=%d), using output.weight%n",
+                tokenEmbedCorrupted = true;
+                System.err.printf("[OLMOE-TENSOR-ENTRY-TIED] ✅ DETECTED: token_embd tensor entry has tied embeddings pattern (sum=%.6f, negZeros=%d)%n",
                                 embSum, negativeZeroCount);
+                System.err.println("[OLMOE-TENSOR-ENTRY-TIED] Using output.weight as token embeddings (matches llama.cpp)");
                 tokenEmbeddings = outputWeight;
+            } else {
+                System.err.printf("[OLMOE-LOADER] Using separate token embeddings (sum=%.6f, negZeros=%d)%n", embSum, negativeZeroCount);
             }
         }
 
@@ -796,6 +799,14 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 throw new IllegalArgumentException("Missing K normalization weights for layer " + i);
             }
 
+            // CRITICAL DEBUG: Verify weight integrity for key tensors (only first layer to avoid spam)
+            if (i == 0) {
+                verifyWeightIntegrity(attnQNormWeights[i], "attn_q_norm[0]");
+                verifyWeightIntegrity(attnKNormWeights[i], "attn_k_norm[0]");
+                verifyWeightIntegrity(attentionNorms[i], "attn_norm[0]");
+                verifyWeightIntegrity(ffnNorms[i], "ffn_norm[0]");
+            }
+
             // Convert MoE weights to FloatArrays
             org.beehive.gpullama3.core.model.tensor.FloatTensor routerTensor = loadedTensors.get("blk." + i + ".ffn_gate_inp.weight");
             if (routerTensor != null) {
@@ -848,6 +859,23 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             sourceExpertDownWeights[i] = loadedTensors.get("blk." + i + ".ffn_down_exps.weight");
             sourceExpertUpWeights[i] = loadedTensors.get("blk." + i + ".ffn_up_exps.weight");
         }
+
+        // CRITICAL DEBUG: Verify the most important tensors for generation
+        System.err.println("[WEIGHT-VERIFY] ==================== CRITICAL TENSOR VERIFICATION ====================");
+        verifyWeightIntegrity(convertToFloatArray(tokenEmbeddings), "token_embeddings");
+        verifyWeightIntegrity(outputNormArray, "output_norm");
+        if (routerWeights != null && routerWeights.length > 0) {
+            verifyWeightIntegrity(routerWeights[0], "router_weights[0]");
+        }
+        if (queryWeights != null && queryWeights.length > 0) {
+            // Convert HalfFloatArray to FloatArray for verification
+            FloatArray queryFloat = new FloatArray(queryWeights[0].getSize());
+            for (int i = 0; i < queryFloat.getSize(); i++) {
+                queryFloat.set(i, queryWeights[0].get(i).getFloat32());
+            }
+            verifyWeightIntegrity(queryFloat, "query_weights[0]");
+        }
+        System.err.println("[WEIGHT-VERIFY] ===================================================================");
 
         return new OlmoeTornadoWeights(
                 convertToFloatArray(tokenEmbeddings),  // tokenEmbeddingTable
@@ -933,5 +961,76 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             halfFloatArray.set(i, new HalfFloat(floatArray.get(i)));
         }
         return halfFloatArray;
+    }
+
+    /**
+     * CRITICAL DEBUG: Verify weight data integrity by computing checksum and sampling values
+     * This helps identify if weight loading, quantization, or tensor conversion is corrupting data.
+     */
+    private static void verifyWeightIntegrity(FloatArray tensor, String tensorName) {
+        if (tensor == null) {
+            System.err.printf("[WEIGHT-VERIFY] %s: NULL TENSOR!%n", tensorName);
+            return;
+        }
+
+        // Calculate checksum of sampled values
+        double sum = 0.0;
+        float minVal = Float.POSITIVE_INFINITY;
+        float maxVal = Float.NEGATIVE_INFINITY;
+        int zeroCount = 0;
+
+        // Sample key positions: first 10, last 10, middle 10, and every 1000th element
+        int[] sampleIndices = new int[Math.min(100, tensor.getSize())];
+        int sampleCount = 0;
+
+        // First 10
+        for (int i = 0; i < Math.min(10, tensor.getSize()); i++) {
+            sampleIndices[sampleCount++] = i;
+        }
+        // Last 10
+        for (int i = Math.max(0, tensor.getSize() - 10); i < tensor.getSize(); i++) {
+            sampleIndices[sampleCount++] = i;
+        }
+        // Middle 10
+        int middle = tensor.getSize() / 2;
+        for (int i = Math.max(0, middle - 5); i < Math.min(tensor.getSize(), middle + 5); i++) {
+            sampleIndices[sampleCount++] = i;
+        }
+        // Every 1000th element
+        for (int i = 1000; i < tensor.getSize() && sampleCount < 100; i += 1000) {
+            sampleIndices[sampleCount++] = i;
+        }
+
+        // Calculate statistics from samples
+        for (int i = 0; i < sampleCount; i++) {
+            float val = tensor.get(sampleIndices[i]);
+            sum += val;
+            minVal = Math.min(minVal, val);
+            maxVal = Math.max(maxVal, val);
+            if (val == 0.0f) zeroCount++;
+        }
+
+        float avgVal = (float)(sum / sampleCount);
+
+        System.err.printf("[WEIGHT-VERIFY] %s: size=%d, samples=%d, checksum=%.8f, avg=%.8f, min=%.8f, max=%.8f, zeros=%d%n",
+                         tensorName, tensor.getSize(), sampleCount, sum, avgVal, minVal, maxVal, zeroCount);
+
+        // Show first 5 values for pattern analysis
+        System.err.printf("[WEIGHT-PATTERN] %s[0:5]: ", tensorName);
+        for (int i = 0; i < Math.min(5, tensor.getSize()); i++) {
+            System.err.printf("%.8f ", tensor.get(i));
+        }
+        System.err.println();
+
+        // Check for suspicious patterns
+        if (Math.abs(avgVal) > 10.0f) {
+            System.err.printf("[WEIGHT-WARNING] %s: Unusually large average value %.8f - possible scaling issue%n", tensorName, avgVal);
+        }
+        if (zeroCount > sampleCount / 2) {
+            System.err.printf("[WEIGHT-WARNING] %s: High zero count %d/%d - possible uninitialized data%n", tensorName, zeroCount, sampleCount);
+        }
+        if (minVal == maxVal && tensor.getSize() > 1) {
+            System.err.printf("[WEIGHT-WARNING] %s: All sampled values identical %.8f - possible tensor corruption%n", tensorName, minVal);
+        }
     }
 }

@@ -277,20 +277,20 @@ public class OlmoeTornadoWeights extends TornadoWeights {
      */
 
     public float[] getExpertGateWeights(int layer, int expertId, int numExperts, int hiddenDim, int dim) {
-        // TEST: Swap dimensions - maybe weights stored as [dim, hiddenDim] not [hiddenDim, dim]
-        return loadExpertWeights("gate", layer, expertId, dim, hiddenDim, expertGateCache,
+        // FIXED: Gate weights are [hiddenDim, dim] - use correct dimensions
+        return loadExpertWeights("gate", layer, expertId, hiddenDim, dim, expertGateCache,
                                 sourceExpertGateWeights, expertGateWeights);
     }
 
     public float[] getExpertDownWeights(int layer, int expertId, int numExperts, int hiddenDim, int dim) {
-        // TEST: Swap dimensions - maybe weights stored as [hiddenDim, dim] not [dim, hiddenDim]
-        return loadExpertWeights("down", layer, expertId, hiddenDim, dim, expertDownCache,
+        // FIXED: Down weights are [dim, hiddenDim] - use correct dimensions
+        return loadExpertWeights("down", layer, expertId, dim, hiddenDim, expertDownCache,
                                 sourceExpertDownWeights, expertDownWeights);
     }
 
     public float[] getExpertUpWeights(int layer, int expertId, int numExperts, int hiddenDim, int dim) {
-        // TEST: Swap dimensions - maybe weights stored as [dim, hiddenDim] not [hiddenDim, dim]
-        return loadExpertWeights("up", layer, expertId, dim, hiddenDim, expertUpCache,
+        // FIXED: Up weights are [hiddenDim, dim] - use correct dimensions
+        return loadExpertWeights("up", layer, expertId, hiddenDim, dim, expertUpCache,
                                 sourceExpertUpWeights, expertUpWeights);
     }
 

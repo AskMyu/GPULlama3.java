@@ -163,7 +163,7 @@ cat README.md | grep -E "version|1\.1\.1" | head -5
 ls -la bin/tornadovm-installer
 ```
 
-### Step 2.1A: Apply Custom Modifications (FloatArrayLongFix)
+### Step 2.1A: Apply Custom Modifications (FloatArrayLongFix + BuffersOnlyFix)
 
 **IMPORTANT**: Check for custom modifications that need to be applied before building:
 
@@ -194,6 +194,69 @@ if [ -f "../patch/FloatArray.java" ]; then
 else
     echo "No custom FloatArray.java modifications found in ../patch/ directory"
     echo "Building with standard TornadoVM FloatArray implementation"
+fi
+
+# Check for BuffersOnly memory management fix
+if [ -f "../patch/TornadoTaskGraphInterface.java" ] && [ -f "../patch/TornadoTaskGraph.java" ]; then
+    echo "🚀 BUFFERS-ONLY-FIX: Custom TornadoVM memory management fixes found"
+    echo "Applying BuffersOnlyFix for surgical GPU buffer cleanup without device reset..."
+
+    # Apply TornadoTaskGraphInterface.java modification
+    INTERFACE_PATH="tornado-api/src/main/java/uk/ac/manchester/tornado/api/TornadoTaskGraphInterface.java"
+    if [ -f "$INTERFACE_PATH" ]; then
+        cp "$INTERFACE_PATH" "$INTERFACE_PATH.backup.$(date +%Y%m%d_%H%M%S)"
+        echo "Original TornadoTaskGraphInterface.java backed up"
+    fi
+    cp "../patch/TornadoTaskGraphInterface.java" "$INTERFACE_PATH"
+    echo "Modified TornadoTaskGraphInterface.java copied to: $INTERFACE_PATH"
+
+    # Apply TornadoTaskGraph.java modification
+    TASKGRAPH_PATH="tornado-runtime/src/main/java/uk/ac/manchester/tornado/runtime/tasks/TornadoTaskGraph.java"
+    if [ -f "$TASKGRAPH_PATH" ]; then
+        cp "$TASKGRAPH_PATH" "$TASKGRAPH_PATH.backup.$(date +%Y%m%d_%H%M%S)"
+        echo "Original TornadoTaskGraph.java backed up"
+    fi
+    cp "../patch/TornadoTaskGraph.java" "$TASKGRAPH_PATH"
+    echo "Modified TornadoTaskGraph.java copied to: $TASKGRAPH_PATH"
+
+    # Apply ImmutableTaskGraph.java modification
+    IMMUTABLE_PATH="tornado-api/src/main/java/uk/ac/manchester/tornado/api/ImmutableTaskGraph.java"
+    if [ -f "$IMMUTABLE_PATH" ]; then
+        cp "$IMMUTABLE_PATH" "$IMMUTABLE_PATH.backup.$(date +%Y%m%d_%H%M%S)"
+        echo "Original ImmutableTaskGraph.java backed up"
+    fi
+    cp "../patch/ImmutableTaskGraph.java" "$IMMUTABLE_PATH"
+    echo "Modified ImmutableTaskGraph.java copied to: $IMMUTABLE_PATH"
+
+    # Apply TornadoExecutor.java modification
+    EXECUTOR_PATH="tornado-api/src/main/java/uk/ac/manchester/tornado/api/TornadoExecutor.java"
+    if [ -f "$EXECUTOR_PATH" ]; then
+        cp "$EXECUTOR_PATH" "$EXECUTOR_PATH.backup.$(date +%Y%m%d_%H%M%S)"
+        echo "Original TornadoExecutor.java backed up"
+    fi
+    cp "../patch/TornadoExecutor.java" "$EXECUTOR_PATH"
+    echo "Modified TornadoExecutor.java copied to: $EXECUTOR_PATH"
+
+    # Apply TornadoExecutionPlan.java modification
+    EXECUTION_PLAN_PATH="tornado-api/src/main/java/uk/ac/manchester/tornado/api/TornadoExecutionPlan.java"
+    if [ -f "$EXECUTION_PLAN_PATH" ]; then
+        cp "$EXECUTION_PLAN_PATH" "$EXECUTION_PLAN_PATH.backup.$(date +%Y%m%d_%H%M%S)"
+        echo "Original TornadoExecutionPlan.java backed up"
+    fi
+    cp "../patch/TornadoExecutionPlan.java" "$EXECUTION_PLAN_PATH"
+    echo "Modified TornadoExecutionPlan.java copied to: $EXECUTION_PLAN_PATH"
+
+    # Verify the BuffersOnly modification was applied
+    if grep -q "freeBuffersOnly" "$INTERFACE_PATH" && grep -q "freeBuffersOnly" "$TASKGRAPH_PATH"; then
+        echo "✓ BuffersOnlyFix modification verified in source"
+        echo "  This fix enables surgical GPU buffer cleanup without device reset"
+        echo "  Fixes: TornadoVM reset/warmup conflicts and stale array references"
+    else
+        echo "⚠️  WARNING: BuffersOnlyFix markers not found - modification may not be applied"
+    fi
+else
+    echo "No custom TornadoVM memory management modifications found in ../patch/ directory"
+    echo "Building with standard TornadoVM memory management"
 fi
 ```
 
@@ -593,7 +656,7 @@ cat > ./TORNADOVM_INSTALLATION_SUMMARY.md << 'EOF'
 - **Version**: TornadoVM 1.1.1
 - **Backends**: OpenCL (required), PTX (NVIDIA, CUDA <= 11.x), SPIRV (Intel, optional)
 - **Type**: Self-contained local installation
-- **Modifications**: Automatically applies FloatArrayLongFix from ../patch/ directory if present
+- **Modifications**: Automatically applies FloatArrayLongFix + BuffersOnlyFix from ../patch/ directory if present
 
 ## Key Files Created
 - `./tornadovm-local/etc/setvars.sh` - Environment setup (self-contained)

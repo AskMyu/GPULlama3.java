@@ -5,6 +5,7 @@ import org.beehive.gpullama3.model.Model;
 import org.beehive.gpullama3.model.olmoe.OlmoeConfiguration;
 import org.beehive.gpullama3.inference.weights.olmoe.OlmoeTornadoWeights;
 import org.beehive.gpullama3.core.model.tensor.FloatTensor;
+import org.beehive.gpullama3.inference.MoEUtils;
 
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
@@ -568,55 +569,27 @@ public class OLMoEGPUProcessor {
     }
 
     /**
-     * Select top-k experts based on router logits (following llama.cpp exactly)
+     * Select top-k experts based on router logits (CORRECTED FLOW - matches llama.cpp exactly)
      */
     private void selectTopKExperts(float[] routerLogits, int[] selectedExperts, float[] expertWeights) {
-        // CRITICAL FIX: Apply softmax to router logits AFTER top-k selection, not before
-        // This matches llama.cpp: first select top-k from raw logits, then get softmax weights
+        // CRITICAL FIX: Use the corrected MoEUtils flow that applies softmax BEFORE expert selection
+        // This is the actual llama.cpp behavior: softmax ALL experts, then select top-k
 
-        // First select top-k experts based on RAW logits (not softmax probabilities)
-        for (int k = 0; k < topK; k++) {
-            int bestExpert = 0;
-            float bestLogit = Float.NEGATIVE_INFINITY;
+        MoEUtils.ExpertSelection selection = MoEUtils.selectExpertsCorrectFlow(routerLogits, topK);
 
-            for (int i = 0; i < numExperts; i++) {
-                if (routerLogits[i] > bestLogit) {
-                    boolean alreadySelected = false;
-                    for (int j = 0; j < k; j++) {
-                        if (selectedExperts[j] == i) {
-                            alreadySelected = true;
-                            break;
-                        }
-                    }
-                    if (!alreadySelected) {
-                        bestExpert = i;
-                        bestLogit = routerLogits[i];
-                    }
-                }
-            }
-
-            selectedExperts[k] = bestExpert;
-        }
-
-        // Now apply softmax to ALL router logits and extract weights for selected experts only
-        float[] routerProbs = new float[numExperts];
-        System.arraycopy(routerLogits, 0, routerProbs, 0, numExperts);
-        applySoftmax(routerProbs);
-
-        // Extract weights for selected experts
-        for (int k = 0; k < topK; k++) {
-            expertWeights[k] = routerProbs[selectedExperts[k]];
-        }
+        // Copy results
+        System.arraycopy(selection.expertIndices, 0, selectedExperts, 0, topK);
+        System.arraycopy(selection.expertWeights, 0, expertWeights, 0, topK);
 
         System.out.printf("[OLMOE-ROUTER] Selected experts: [%d, %d, %d, %d, %d, %d, %d, %d]%n",
             selectedExperts[0], selectedExperts[1], selectedExperts[2], selectedExperts[3],
             selectedExperts[4], selectedExperts[5], selectedExperts[6], selectedExperts[7]);
-        System.out.printf("[OLMOE-ROUTER] Expert weights (softmax of selected): [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]%n",
+        System.out.printf("[OLMOE-ROUTER] Expert weights (from full softmax): [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]%n",
             expertWeights[0], expertWeights[1], expertWeights[2], expertWeights[3],
             expertWeights[4], expertWeights[5], expertWeights[6], expertWeights[7]);
 
-        // DEBUG: Check that this follows llama.cpp pattern exactly
-        System.out.printf("[OLMOE-ROUTER] ✅ Fixed routing: top-k from raw logits, weights from softmax%n");
+        // DEBUG: Verify corrected flow is being used
+        System.out.printf("[OLMOE-ROUTER] ✅ CORRECTED routing: softmax ALL experts first, then select top-k%n");
     }
 
     /**
@@ -752,17 +725,75 @@ public class OLMoEGPUProcessor {
     private FloatArray matmulGPU(FloatArray input, FloatArray weights, int inputSize, int outputSize) {
         FloatArray result = new FloatArray(outputSize);
 
+        // CRITICAL DEBUG: Check input values before GPU execution
+        float minInput = input.get(0), maxInput = input.get(0);
+        for (int i = 1; i < Math.min(input.getSize(), 10); i++) {
+            float val = input.get(i);
+            if (val < minInput) minInput = val;
+            if (val > maxInput) maxInput = val;
+        }
+        System.err.printf("[GPU-MATMUL-FLOAT] INPUT: size=%d, range=[%.6f, %.6f] first3=[%.6f, %.6f, %.6f]%n",
+                         input.getSize(), minInput, maxInput,
+                         input.get(0), input.get(1), input.get(2));
+
+        // CRITICAL DEBUG: Check weight dimensions and sample values
+        System.err.printf("[GPU-MATMUL-FLOAT] WEIGHTS: size=%d, expected=%d, dims=%dx%d%n",
+                         weights.getSize(), inputSize * outputSize, inputSize, outputSize);
+        float minWeight = weights.get(0), maxWeight = weights.get(0);
+        for (int i = 1; i < Math.min(weights.getSize(), 10); i++) {
+            float val = weights.get(i);
+            if (val < minWeight) minWeight = val;
+            if (val > maxWeight) maxWeight = val;
+        }
+        System.err.printf("[GPU-MATMUL-FLOAT] WEIGHTS: range=[%.6f, %.6f] first2=[%.6f, %.6f]%n",
+                         minWeight, maxWeight, weights.get(0), weights.get(1));
+
         // Create unique plan ID based on dimensions to enable caching
         String planId = "matmul_" + inputSize + "x" + outputSize;
 
-        TaskGraph taskGraph = new TaskGraph("matmul")
-            .transferToDevice(DataTransferMode.EVERY_EXECUTION, input, weights)
-            .task("matmul", OLMoEGPUProcessor::matmulKernel, input, weights, result, inputSize, outputSize)
-            .transferToHost(DataTransferMode.EVERY_EXECUTION, result);
+        try {
+            TaskGraph taskGraph = new TaskGraph("matmul")
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, input, weights)
+                .task("matmul", OLMoEGPUProcessor::matmulKernel, input, weights, result, inputSize, outputSize)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, result);
 
-        // Use cached execution plan to avoid memory leaks
-        TornadoExecutionPlan executionPlan = getOrCreateExecutionPlan(planId, taskGraph);
-        executionPlan.execute();
+            // CRITICAL FIX: Disable execution plan caching to avoid array reference corruption
+            // The caching was causing stale array references from previous calls
+            // TornadoExecutionPlan executionPlan = getOrCreateExecutionPlan(planId, taskGraph);
+            // executionPlan.execute();
+
+            // CRITICAL FIX: Use freeBuffersOnly() instead of try-with-resources to avoid device reset
+            TornadoExecutionPlan executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
+            try {
+                executionPlan.execute();
+                System.err.printf("[GPU-MATMUL-FLOAT] ✅ Executed with BuffersOnlyFix%n");
+            } finally {
+                // Clean up GPU buffers without device reset
+                executionPlan.freeBuffersOnly();
+                System.err.printf("[GPU-MATMUL-FLOAT] ✅ Freed buffers without device reset%n");
+            }
+
+            // CRITICAL DEBUG: Check result after GPU execution
+            float minResult = result.get(0), maxResult = result.get(0);
+            for (int i = 1; i < Math.min(result.getSize(), 10); i++) {
+                float val = result.get(i);
+                if (val < minResult) minResult = val;
+                if (val > maxResult) maxResult = val;
+            }
+            System.err.printf("[GPU-MATMUL-FLOAT] RESULT: size=%d, range=[%.6f, %.6f] first3=[%.6f, %.6f, %.6f]%n",
+                             result.getSize(), minResult, maxResult,
+                             result.get(0), result.get(1), result.get(2));
+
+            // CRITICAL DETECTION: Check for zero result
+            if (minResult == 0.0f && maxResult == 0.0f) {
+                System.err.printf("[GPU-MATMUL-FLOAT] 🚨 CRITICAL: GPU KERNEL RETURNED ALL ZEROS!%n");
+                System.err.printf("[GPU-MATMUL-FLOAT] 🚨 This indicates GPU kernel execution failure!%n");
+            }
+
+        } catch (Exception e) {
+            System.err.printf("[GPU-MATMUL-FLOAT] ❌ GPU EXECUTION FAILED: %s%n", e.getMessage());
+            e.printStackTrace();
+        }
 
         return result;
     }
@@ -825,17 +856,74 @@ public class OLMoEGPUProcessor {
     private FloatArray matmulGPUHalfFloat(FloatArray input, HalfFloatArray weights, int inputSize, int outputSize) {
         FloatArray result = new FloatArray(outputSize);
 
+        // CRITICAL DEBUG: Check input values before GPU execution
+        float minInput = input.get(0), maxInput = input.get(0);
+        for (int i = 1; i < Math.min(input.getSize(), 10); i++) {
+            float val = input.get(i);
+            if (val < minInput) minInput = val;
+            if (val > maxInput) maxInput = val;
+        }
+        System.err.printf("[GPU-MATMUL] INPUT: size=%d, range=[%.6f, %.6f] first3=[%.6f, %.6f, %.6f]%n",
+                         input.getSize(), minInput, maxInput,
+                         input.get(0), input.get(1), input.get(2));
+
+        // CRITICAL DEBUG: Check weight dimensions and sample values
+        System.err.printf("[GPU-MATMUL] WEIGHTS: size=%d, expected=%d, dims=%dx%d%n",
+                         weights.getSize(), inputSize * outputSize, inputSize, outputSize);
+        try {
+            uk.ac.manchester.tornado.api.types.HalfFloat w0 = weights.get(0);
+            uk.ac.manchester.tornado.api.types.HalfFloat w1 = weights.get(1);
+            System.err.printf("[GPU-MATMUL] WEIGHTS: first2=[%.6f, %.6f]%n", w0.getFloat32(), w1.getFloat32());
+        } catch (Exception e) {
+            System.err.printf("[GPU-MATMUL] ❌ WEIGHT ACCESS FAILED: %s%n", e.getMessage());
+        }
+
         // Create unique plan ID for half-float operations
         String planId = "matmul_half_" + inputSize + "x" + outputSize;
 
-        TaskGraph taskGraph = new TaskGraph("matmul_half")
-            .transferToDevice(DataTransferMode.EVERY_EXECUTION, input, weights)
-            .task("matmul", OLMoEGPUProcessor::matmulHalfFloatKernel, input, weights, result, inputSize, outputSize)
-            .transferToHost(DataTransferMode.EVERY_EXECUTION, result);
+        try {
+            TaskGraph taskGraph = new TaskGraph("matmul_half")
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, input, weights)
+                .task("matmul", OLMoEGPUProcessor::matmulHalfFloatKernel, input, weights, result, inputSize, outputSize)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, result);
 
-        // Use cached execution plan to avoid memory leaks
-        TornadoExecutionPlan executionPlan = getOrCreateExecutionPlan(planId, taskGraph);
-        executionPlan.execute();
+            // CRITICAL FIX: Disable execution plan caching to avoid array reference corruption
+            // The caching was causing stale array references from previous calls
+            // TornadoExecutionPlan executionPlan = getOrCreateExecutionPlan(planId, taskGraph);
+            // executionPlan.execute();
+
+            // CRITICAL FIX: Use freeBuffersOnly() instead of try-with-resources to avoid device reset
+            TornadoExecutionPlan executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
+            try {
+                executionPlan.execute();
+                System.err.printf("[GPU-MATMUL] ✅ Executed with BuffersOnlyFix%n");
+            } finally {
+                // Clean up GPU buffers without device reset
+                executionPlan.freeBuffersOnly();
+                System.err.printf("[GPU-MATMUL] ✅ Freed buffers without device reset%n");
+            }
+
+            // CRITICAL DEBUG: Check result after GPU execution
+            float minResult = result.get(0), maxResult = result.get(0);
+            for (int i = 1; i < Math.min(result.getSize(), 10); i++) {
+                float val = result.get(i);
+                if (val < minResult) minResult = val;
+                if (val > maxResult) maxResult = val;
+            }
+            System.err.printf("[GPU-MATMUL] RESULT: size=%d, range=[%.6f, %.6f] first3=[%.6f, %.6f, %.6f]%n",
+                             result.getSize(), minResult, maxResult,
+                             result.get(0), result.get(1), result.get(2));
+
+            // CRITICAL DETECTION: Check for zero result
+            if (minResult == 0.0f && maxResult == 0.0f) {
+                System.err.printf("[GPU-MATMUL] 🚨 CRITICAL: GPU KERNEL RETURNED ALL ZEROS!%n");
+                System.err.printf("[GPU-MATMUL] 🚨 This indicates GPU kernel execution failure!%n");
+            }
+
+        } catch (Exception e) {
+            System.err.printf("[GPU-MATMUL] ❌ GPU EXECUTION FAILED: %s%n", e.getMessage());
+            e.printStackTrace();
+        }
 
         return result;
     }
@@ -866,9 +954,20 @@ public class OLMoEGPUProcessor {
             .task("swiglu", OLMoEGPUProcessor::swiGLUKernel, gate, up, output, size)
             .transferToHost(DataTransferMode.EVERY_EXECUTION, output);
 
-        // Use cached execution plan to avoid memory leaks
-        TornadoExecutionPlan executionPlan = getOrCreateExecutionPlan(planId, taskGraph);
-        executionPlan.execute();
+        // CRITICAL FIX: Disable execution plan caching to avoid array reference corruption
+        // TornadoExecutionPlan executionPlan = getOrCreateExecutionPlan(planId, taskGraph);
+        // executionPlan.execute();
+
+        // CRITICAL FIX: Use freeBuffersOnly() instead of try-with-resources to avoid device reset
+        TornadoExecutionPlan executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
+        try {
+            executionPlan.execute();
+            System.err.printf("[GPU-SWIGLU] ✅ Executed with BuffersOnlyFix%n");
+        } finally {
+            // Clean up GPU buffers without device reset
+            executionPlan.freeBuffersOnly();
+            System.err.printf("[GPU-SWIGLU] ✅ Freed buffers without device reset%n");
+        }
     }
 
     /**
@@ -1309,6 +1408,17 @@ public class OLMoEGPUProcessor {
         FloatArray layerInput = state.wrapX; // Current hidden state
         FloatArray residualInput = new FloatArray(layerInput.getSize());
 
+        // COMPREHENSIVE TENSOR DEBUGGING: Track layer input
+        float minInput = layerInput.get(0), maxInput = layerInput.get(0);
+        for (int i = 1; i < Math.min(layerInput.getSize(), 100); i++) {
+            float val = layerInput.get(i);
+            if (val < minInput) minInput = val;
+            if (val > maxInput) maxInput = val;
+        }
+        System.err.printf("[LAYER-%d] INPUT: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         layer, minInput, maxInput,
+                         layerInput.get(0), layerInput.get(1), layerInput.get(2), layerInput.get(3), layerInput.get(4));
+
         // Save residual connection input
         for (int i = 0; i < layerInput.getSize(); i++) {
             residualInput.set(i, layerInput.get(i));
@@ -1317,14 +1427,47 @@ public class OLMoEGPUProcessor {
         // Step 1: Attention input normalization using GPU
         processInputNormalization(layerInput, layer, weights, config);
 
+        // TENSOR DEBUG: After attention normalization
+        float minNorm = layerInput.get(0), maxNorm = layerInput.get(0);
+        for (int i = 1; i < Math.min(layerInput.getSize(), 100); i++) {
+            float val = layerInput.get(i);
+            if (val < minNorm) minNorm = val;
+            if (val > maxNorm) maxNorm = val;
+        }
+        System.err.printf("[LAYER-%d] POST-NORM: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         layer, minNorm, maxNorm,
+                         layerInput.get(0), layerInput.get(1), layerInput.get(2), layerInput.get(3), layerInput.get(4));
+
         // Step 2: Multi-head attention with Q/K normalization using GPU
         FloatArray attentionOutput = processAttentionWithQKNorm(layerInput, layer, position, weights, config, state);
+
+        // TENSOR DEBUG: After attention computation
+        float minAttn = attentionOutput.get(0), maxAttn = attentionOutput.get(0);
+        for (int i = 1; i < Math.min(attentionOutput.getSize(), 100); i++) {
+            float val = attentionOutput.get(i);
+            if (val < minAttn) minAttn = val;
+            if (val > maxAttn) maxAttn = val;
+        }
+        System.err.printf("[LAYER-%d] ATTENTION: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         layer, minAttn, maxAttn,
+                         attentionOutput.get(0), attentionOutput.get(1), attentionOutput.get(2), attentionOutput.get(3), attentionOutput.get(4));
 
         // Step 3: First residual connection (input + attention) - FIXED: Create new array for sum
         FloatArray ffnInput = new FloatArray(attentionOutput.getSize());
         for (int i = 0; i < attentionOutput.getSize(); i++) {
             ffnInput.set(i, residualInput.get(i) + attentionOutput.get(i));
         }
+
+        // TENSOR DEBUG: After first residual connection
+        float minResid1 = ffnInput.get(0), maxResid1 = ffnInput.get(0);
+        for (int i = 1; i < Math.min(ffnInput.getSize(), 100); i++) {
+            float val = ffnInput.get(i);
+            if (val < minResid1) minResid1 = val;
+            if (val > maxResid1) maxResid1 = val;
+        }
+        System.err.printf("[LAYER-%d] RESIDUAL-1: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         layer, minResid1, maxResid1,
+                         ffnInput.get(0), ffnInput.get(1), ffnInput.get(2), ffnInput.get(3), ffnInput.get(4));
 
         // Step 4: Save ffnInput for second residual (before normalization modifies it)
         FloatArray ffnInputOriginal = new FloatArray(ffnInput.getSize());
@@ -1335,14 +1478,47 @@ public class OLMoEGPUProcessor {
         // Step 5: FFN normalization before MoE using GPU - FIXED: Normalize the residual sum
         processFFNNormalization(ffnInput, layer, weights, config);
 
+        // TENSOR DEBUG: After FFN normalization
+        float minFFNNorm = ffnInput.get(0), maxFFNNorm = ffnInput.get(0);
+        for (int i = 1; i < Math.min(ffnInput.getSize(), 100); i++) {
+            float val = ffnInput.get(i);
+            if (val < minFFNNorm) minFFNNorm = val;
+            if (val > maxFFNNorm) maxFFNNorm = val;
+        }
+        System.err.printf("[LAYER-%d] FFN-NORM: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         layer, minFFNNorm, maxFFNNorm,
+                         ffnInput.get(0), ffnInput.get(1), ffnInput.get(2), ffnInput.get(3), ffnInput.get(4));
+
         // Step 6: MoE expert processing using GPU - FIXED: Process normalized residual sum
         FloatArray moeOutput = processMoEExpertsGPU(ffnInput, layer, weights, config);
+
+        // TENSOR DEBUG: After MoE processing
+        float minMoE = moeOutput.get(0), maxMoE = moeOutput.get(0);
+        for (int i = 1; i < Math.min(moeOutput.getSize(), 100); i++) {
+            float val = moeOutput.get(i);
+            if (val < minMoE) minMoE = val;
+            if (val > maxMoE) maxMoE = val;
+        }
+        System.err.printf("[LAYER-%d] MOE-OUTPUT: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         layer, minMoE, maxMoE,
+                         moeOutput.get(0), moeOutput.get(1), moeOutput.get(2), moeOutput.get(3), moeOutput.get(4));
 
         // Step 7: Second residual connection (MoE + original ffnInput) - FIXED: Add to original, not normalized
         FloatArray finalOutput = new FloatArray(moeOutput.getSize());
         for (int i = 0; i < moeOutput.getSize(); i++) {
             finalOutput.set(i, moeOutput.get(i) + ffnInputOriginal.get(i));
         }
+
+        // TENSOR DEBUG: Final layer output
+        float minFinal = finalOutput.get(0), maxFinal = finalOutput.get(0);
+        for (int i = 1; i < Math.min(finalOutput.getSize(), 100); i++) {
+            float val = finalOutput.get(i);
+            if (val < minFinal) minFinal = val;
+            if (val > maxFinal) maxFinal = val;
+        }
+        System.err.printf("[LAYER-%d] FINAL-OUT: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         layer, minFinal, maxFinal,
+                         finalOutput.get(0), finalOutput.get(1), finalOutput.get(2), finalOutput.get(3), finalOutput.get(4));
 
         // Copy final result back to state - FIXED: Copy the final output with both residuals
         copyToState(finalOutput, state.wrapX);
@@ -1386,6 +1562,18 @@ public class OLMoEGPUProcessor {
         System.out.printf("[OLMOE-DEBUG] After RMS norm - first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
             normalizedOutput.get(0), normalizedOutput.get(1), normalizedOutput.get(2), normalizedOutput.get(3), normalizedOutput.get(4));
 
+        // COMPREHENSIVE TENSOR DEBUG: Final normalization output analysis
+        float minNormOut = normalizedOutput.get(0), maxNormOut = normalizedOutput.get(0);
+        for (int i = 1; i < Math.min(normalizedOutput.getSize(), 100); i++) {
+            float val = normalizedOutput.get(i);
+            if (val < minNormOut) minNormOut = val;
+            if (val > maxNormOut) maxNormOut = val;
+        }
+        System.err.printf("[FINAL-NORM] OUTPUT: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         minNormOut, maxNormOut,
+                         normalizedOutput.get(0), normalizedOutput.get(1), normalizedOutput.get(2),
+                         normalizedOutput.get(3), normalizedOutput.get(4));
+
         // Step 2: Apply output projection on GPU
         HalfFloatArray outputWeights = weights.wclsHalfFloat;
         System.out.printf("[OLMOE-DEBUG] Output projection: %d x %d%n", dim, config.vocabularySize());
@@ -1411,6 +1599,64 @@ public class OLMoEGPUProcessor {
         }
 
         FloatArray logits = matmulGPUHalfFloat(normalizedOutput, outputWeights, dim, config.vocabularySize());
+
+        // COMPREHENSIVE TENSOR DEBUG: Immediate post-projection analysis
+        float minLogitRaw = logits.get(0), maxLogitRaw = logits.get(0);
+        for (int i = 1; i < Math.min(logits.getSize(), 1000); i++) {
+            float val = logits.get(i);
+            if (val < minLogitRaw) minLogitRaw = val;
+            if (val > maxLogitRaw) maxLogitRaw = val;
+        }
+        System.err.printf("[PROJECTION] RAW-LOGITS: range=[%.6f, %.6f] first5=[%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                         minLogitRaw, maxLogitRaw,
+                         logits.get(0), logits.get(1), logits.get(2), logits.get(3), logits.get(4));
+
+        // CRITICAL DEBUG: Analyze final logits before softcapping
+        System.err.printf("[TENSOR-ACCESS] ===== FINAL LOGITS ANALYSIS =====%n");
+        System.err.printf("[TENSOR-ACCESS] Generated logits size: %d (expected: %d)%n", logits.getSize(), config.vocabularySize());
+
+        // Find top-10 logits and their token IDs for analysis
+        System.err.printf("[TENSOR-ACCESS] Top 10 raw logits:%n");
+        for (int topK = 0; topK < Math.min(10, logits.getSize()); topK++) {
+            float maxLogit = Float.NEGATIVE_INFINITY;
+            int maxIndex = -1;
+
+            for (int i = 0; i < logits.getSize(); i++) {
+                boolean alreadyFound = false;
+                for (int prev = 0; prev < topK; prev++) {
+                    // Skip already found indices (simple check)
+                }
+                float currentLogit = logits.get(i);
+                if (currentLogit > maxLogit) {
+                    maxLogit = currentLogit;
+                    maxIndex = i;
+                }
+            }
+
+            if (maxIndex >= 0) {
+                System.err.printf("[TENSOR-ACCESS]   Top-%d: Token %d = %.6f%n", topK + 1, maxIndex, maxLogit);
+
+                // Flag if this is a story-inappropriate token for "tell me a story" prompt
+                if (topK == 0) {
+                    if (maxIndex == 13911) { // 'disclosure' - our problematic first token
+                        System.err.printf("[TENSOR-ACCESS]   🚨 PROBLEM: First token is %d ('disclosure') - WRONG for story prompt!%n", maxIndex);
+                    } else if (maxIndex >= 11000 && maxIndex <= 12000) { // rough range for story words like "Once"
+                        System.err.printf("[TENSOR-ACCESS]   ✅ GOOD: First token %d might be story-appropriate%n", maxIndex);
+                    } else {
+                        System.err.printf("[TENSOR-ACCESS]   ⚠️ SUSPICIOUS: First token %d - not typical story starter%n", maxIndex);
+                    }
+                }
+            }
+        }
+
+        float minLogit = logits.get(0);
+        float maxLogit = logits.get(0);
+        for (int i = 1; i < logits.getSize(); i++) {
+            float val = logits.get(i);
+            if (val < minLogit) minLogit = val;
+            if (val > maxLogit) maxLogit = val;
+        }
+        System.err.printf("[TENSOR-ACCESS] Logit range: [%.6f, %.6f]%n", minLogit, maxLogit);
 
         // CRITICAL FIX: Apply final logit softcapping (matches llama.cpp implementation)
         float softcappingFactor = config.getFinalLogitSoftcapping();

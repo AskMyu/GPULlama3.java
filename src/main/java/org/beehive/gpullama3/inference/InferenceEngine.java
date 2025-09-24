@@ -690,10 +690,80 @@ public final class InferenceEngine {
 
         // Main generation loop
         while (pos < actualMaxTokens) {
+            // 🔍 PROGRESSIVE STATE DEBUG - Before forward pass
+            System.err.printf("[STATE-DEBUG-%d] ===== ITERATION %d START =====\n", pos, pos);
+            System.err.printf("[STATE-DEBUG-%d] Current token: %d, Position: %d\n", pos, currentToken, pos);
+
+            // Track state hash/signature before forward pass
+            if (state.wrapX != null && state.wrapX.getSize() > 0) {
+                float[] firstValues = new float[Math.min(5, state.wrapX.getSize())];
+                for (int i = 0; i < firstValues.length; i++) {
+                    firstValues[i] = state.wrapX.get(i);
+                }
+                System.err.printf("[STATE-DEBUG-%d] Hidden state BEFORE forward: first5=[%.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                    pos, firstValues[0], firstValues.length > 1 ? firstValues[1] : 0.0f,
+                    firstValues.length > 2 ? firstValues[2] : 0.0f, firstValues.length > 3 ? firstValues[3] : 0.0f,
+                    firstValues.length > 4 ? firstValues[4] : 0.0f);
+            }
+
+            // Track logits state before forward pass
+            if (state.wrapLogits != null && state.wrapLogits.getSize() > 0) {
+                System.err.printf("[STATE-DEBUG-%d] Logits BEFORE forward: first3=[%.6f, %.6f, %.6f]\n",
+                    pos, state.wrapLogits.get(0), state.wrapLogits.get(1), state.wrapLogits.get(2));
+            }
+
             // GPU Forward Pass - Call model.forward() to handle model-specific logic (e.g., OLMoE routing)
             System.err.printf("[INFERENCE-DEBUG] About to call model.forward(): currentToken=%d, pos=%d%n", currentToken, pos);
             model.forward(state, currentToken, pos);
             FloatArray logits = state.wrapLogits;
+
+            // 🔍 PROGRESSIVE STATE DEBUG - After forward pass
+            System.err.printf("[STATE-DEBUG-%d] ===== POST-FORWARD ANALYSIS =====\n", pos);
+
+            // Track state changes after forward pass
+            if (state.wrapX != null && state.wrapX.getSize() > 0) {
+                float[] afterValues = new float[Math.min(5, state.wrapX.getSize())];
+                for (int i = 0; i < afterValues.length; i++) {
+                    afterValues[i] = state.wrapX.get(i);
+                }
+                System.err.printf("[STATE-DEBUG-%d] Hidden state AFTER forward: first5=[%.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                    pos, afterValues[0], afterValues.length > 1 ? afterValues[1] : 0.0f,
+                    afterValues.length > 2 ? afterValues[2] : 0.0f, afterValues.length > 3 ? afterValues[3] : 0.0f,
+                    afterValues.length > 4 ? afterValues[4] : 0.0f);
+            }
+
+            // Track logits quality after forward pass
+            if (logits != null && logits.getSize() > 0) {
+                float logitSum = 0.0f;
+                float logitMax = Float.NEGATIVE_INFINITY;
+                float logitMin = Float.POSITIVE_INFINITY;
+                int zeroCount = 0;
+                int identicalCount = 0;
+                float firstLogit = logits.get(0);
+
+                for (int i = 0; i < Math.min(100, logits.getSize()); i++) {
+                    float val = logits.get(i);
+                    logitSum += val;
+                    logitMax = Math.max(logitMax, val);
+                    logitMin = Math.min(logitMin, val);
+                    if (Math.abs(val) < 1e-9) zeroCount++;
+                    if (Math.abs(val - firstLogit) < 1e-9) identicalCount++;
+                }
+
+                System.err.printf("[STATE-DEBUG-%d] Logits AFTER forward: first3=[%.6f, %.6f, %.6f]\n",
+                    pos, logits.get(0), logits.get(1), logits.get(2));
+                System.err.printf("[STATE-DEBUG-%d] Logits stats: sum=%.6f, range=[%.6f, %.6f], zeros=%d/100, identical=%d/100\n",
+                    pos, logitSum, logitMin, logitMax, zeroCount, identicalCount);
+
+                // CRITICAL: Detect degenerate logits patterns
+                if (identicalCount >= 90) {
+                    System.err.printf("[STATE-DEBUG-%d] ❌ DEGENERATE LOGITS: %d/100 values identical (%.6f)\n",
+                        pos, identicalCount, firstLogit);
+                }
+                if (zeroCount >= 90) {
+                    System.err.printf("[STATE-DEBUG-%d] ❌ ZERO LOGITS: %d/100 values are zero\n", pos, zeroCount);
+                }
+            }
 
             // CRITICAL DEBUG: Track prompt processing state
             System.err.printf("[PROMPT-DEBUG] promptIndex=%d, promptTokens.size()=%d, pos=%d%n", promptIndex, promptTokens.size(), pos);
@@ -796,6 +866,25 @@ public final class InferenceEngine {
             currentToken = nextToken;
             state.latestToken = currentToken;
             pos++;
+
+            // 🔍 PROGRESSIVE STATE DEBUG - After state update
+            System.err.printf("[STATE-DEBUG-%d] ===== ITERATION %d END =====\n", pos-1, pos-1);
+            System.err.printf("[STATE-DEBUG-%d] Updated: currentToken=%d, state.latestToken=%d, pos=%d\n",
+                pos-1, currentToken, state.latestToken, pos);
+
+            // Critical: Compare hidden state before/after token update to detect stagnation
+            if (state.wrapX != null && state.wrapX.getSize() > 0) {
+                System.err.printf("[STATE-DEBUG-%d] Hidden state FINAL: first5=[%.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                    pos-1, state.wrapX.get(0), state.wrapX.get(1), state.wrapX.get(2),
+                    state.wrapX.get(3), state.wrapX.get(4));
+
+                // Detect if hidden state is identical between iterations (stagnation bug)
+                if (pos > 1) {
+                    System.err.printf("[STATE-DEBUG-%d] 🔍 STAGNATION CHECK: Compare with previous iteration\n", pos-1);
+                }
+            }
+
+            System.err.printf("[STATE-DEBUG-%d] =====================================\n\n", pos-1);
         }
 
         // === Performance Metrics ===

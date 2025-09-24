@@ -2234,14 +2234,37 @@ public final class InferenceCore {
                                                             token, config.vocabularySize() - 1));
         }
 
+        // CRITICAL DEBUG: Token embedding access validation
+        long embeddingOffset = (long)token * config.dim() * Float.BYTES;
+        System.err.printf("[TENSOR-ACCESS] Token %d embedding lookup: offset=%d, dim=%d%n", token, embeddingOffset, config.dim());
+
+        // Sample the embedding values being copied for validation
+        if (token == 38878) { // 'tell' token - our test case
+            System.err.printf("[TENSOR-ACCESS] CRITICAL: Token 38878 ('tell') embedding values:%n");
+            for (int i = 0; i < Math.min(5, config.dim()); i++) {
+                long valueOffset = embeddingOffset + (i * Float.BYTES);
+                float embeddingValue = olmoeWeights.tokenEmbeddingTable.getSegment().getAtIndex(java.lang.foreign.ValueLayout.JAVA_FLOAT, valueOffset / Float.BYTES);
+                System.err.printf("[TENSOR-ACCESS]   embedding[%d] = %.8f%n", i, embeddingValue);
+            }
+        }
+
         // Copy token embedding to GPU state using TornadoVM-style memory operations
         java.lang.foreign.MemorySegment.copy(
             olmoeWeights.tokenEmbeddingTable.getSegment(),
-            (long)token * config.dim() * Float.BYTES,
+            embeddingOffset,
             state.wrapX.getSegment(),
             0,
             config.dim() * Float.BYTES
         );
+
+        // CRITICAL DEBUG: Verify what was actually copied to state
+        if (token == 38878) {
+            System.err.printf("[TENSOR-ACCESS] Token 38878 copied to state.wrapX:%n");
+            for (int i = 0; i < Math.min(5, config.dim()); i++) {
+                float copiedValue = state.wrapX.getSegment().getAtIndex(java.lang.foreign.ValueLayout.JAVA_FLOAT, i);
+                System.err.printf("[TENSOR-ACCESS]   wrapX[%d] = %.8f%n", i, copiedValue);
+            }
+        }
 
         // Process using integrated TornadoVM + OLMoE pipeline
         System.err.println("[OLMOE-GPU] 🚀 Processing with TornadoVM data flow + OLMoE computation");
