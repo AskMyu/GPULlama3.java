@@ -962,7 +962,7 @@ public class TransformerComputeKernelsLayered {
         if (rowId >= dim0) {
             return;
         }
-        float sum = matrixVectorRowMajorOptimized(context, localSize, x, w, dim1);
+        float sum = matrixVectorColumnMajorOptimized(context, localSize, x, w, dim1, dim0, rowId);
 
         // Thread 0 in each workgroup writes the final result
         if (localId == 0) {
@@ -1139,6 +1139,53 @@ public class TransformerComputeKernelsLayered {
         float partialSum = 0.0f;
         for (int j = localId; j < n; j += localSize) {
             int matrixIdx = rowOffset + j;
+            partialSum += w.get(matrixIdx).getFloat32() * x.get(j);
+        }
+
+        // Store partial sum in local memory
+        localSum[localId] = partialSum;
+        context.localBarrier();
+
+        // Parallel reduction within workgroup
+        for (int stride = localSize / 2; stride > 0; stride >>= 1) {
+            if (localId < stride) {
+                localSum[localId] += localSum[localId + stride];
+            }
+            context.localBarrier();
+        }
+
+        return localSum[0];
+    }
+
+    /**
+     * Column-major matrix-vector multiplication for vocabulary projection.
+     *
+     * Handles matrices stored as [n_embd, n_vocab] where vocabulary tokens are columns.
+     * This is specifically for output/vocabulary projection matrices that follow
+     * GGML/llama.cpp format where ggml_mul_mat(output_matrix, input_vector) computes
+     * the matrix-vector product with proper column-major access.
+     *
+     * @param context Kernel execution context
+     * @param localSize Work group size
+     * @param x Input vector [n_embd]
+     * @param w Weight matrix stored as [n_embd, n_vocab]
+     * @param n_embd Embedding dimension (inner dimension)
+     * @param n_vocab Vocabulary size (outer dimension)
+     * @param vocabId Vocabulary token ID (column index)
+     * @return Dot product result for this vocabulary token
+     */
+    public static float matrixVectorColumnMajorOptimized(KernelContext context, int localSize, FloatArray x, HalfFloatArray w, int n_embd, int n_vocab, int vocabId) {
+        int localId = context.localIdx;
+
+        // Allocate local memory for reduction
+        float[] localSum = context.allocateFloatLocalArray(localSize);
+
+        // Each thread calculates partial dot product
+        float partialSum = 0.0f;
+        for (int j = localId; j < n_embd; j += localSize) {
+            // Column-major access: matrix[j * n_vocab + vocabId]
+            // This accesses column 'vocabId' at embedding dimension 'j'
+            int matrixIdx = j * n_vocab + vocabId;
             partialSum += w.get(matrixIdx).getFloat32() * x.get(j);
         }
 
