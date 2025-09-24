@@ -243,7 +243,6 @@ public class OLMoEGPUProcessor {
     private void processInputNormalization(FloatArray input, int layer,
                                          OlmoeTornadoWeights weights, OlmoeConfiguration config) {
         // Apply attention normalization
-        // In full implementation, this would use GPU kernels
         logger.fine(String.format("[OLMOE-GPU] Layer %d: Input normalization", layer));
 
         // Apply RMS normalization for attention input
@@ -1071,7 +1070,7 @@ public class OLMoEGPUProcessor {
         }
     }
 
-    // Helper methods (simplified implementations for structure)
+    // Helper methods
 
     private FloatArray projectToQuery(FloatArray input, int layer, OlmoeTornadoWeights weights) {
         // Real GPU matrix multiplication for Q projection
@@ -1617,23 +1616,33 @@ public class OLMoEGPUProcessor {
 
         // Find top-10 logits and their token IDs for analysis
         System.err.printf("[TENSOR-ACCESS] Top 10 raw logits:%n");
+        int[] foundIndices = new int[10]; // Track already found indices
         for (int topK = 0; topK < Math.min(10, logits.getSize()); topK++) {
             float maxLogit = Float.NEGATIVE_INFINITY;
             int maxIndex = -1;
 
             for (int i = 0; i < logits.getSize(); i++) {
                 boolean alreadyFound = false;
+                // Check if this index was already found in previous iterations
                 for (int prev = 0; prev < topK; prev++) {
-                    // Skip already found indices (simple check)
+                    if (foundIndices[prev] == i) {
+                        alreadyFound = true;
+                        break;
+                    }
                 }
-                float currentLogit = logits.get(i);
-                if (currentLogit > maxLogit) {
-                    maxLogit = currentLogit;
-                    maxIndex = i;
+
+                // Skip if already found, otherwise check if it's the new maximum
+                if (!alreadyFound) {
+                    float currentLogit = logits.get(i);
+                    if (currentLogit > maxLogit) {
+                        maxLogit = currentLogit;
+                        maxIndex = i;
+                    }
                 }
             }
 
             if (maxIndex >= 0) {
+                foundIndices[topK] = maxIndex; // Store this index as found
                 System.err.printf("[TENSOR-ACCESS]   Top-%d: Token %d = %.6f%n", topK + 1, maxIndex, maxLogit);
 
                 // Flag if this is a story-inappropriate token for "tell me a story" prompt

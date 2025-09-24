@@ -23,7 +23,7 @@ public interface ChatFormat {
             case GemmaTokenizer gemmaTokenizer -> new GemmaChatFormat(gemmaTokenizer);
             case Cl100kTokenizer cl100kTokenizer -> new Cl100kChatFormat(cl100kTokenizer);
             case GptNeoXTokenizer gptNeoXTokenizer -> new GptNeoXChatFormat(gptNeoXTokenizer);
-            case OlmoTokenizer olmoTokenizer -> new OlmoChatFormat(olmoTokenizer);
+            case OlmoTokenizer olmoTokenizer -> new OlmoChatFormat(olmoTokenizer, chatTokens);
             default -> throw new IllegalArgumentException("Unsupported tokenizer type: " + tokenizer.getClass().getName());
         };
     }

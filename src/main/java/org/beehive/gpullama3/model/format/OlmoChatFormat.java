@@ -22,19 +22,37 @@ public class OlmoChatFormat implements ChatFormat {
     protected final int endOfTurn;
     protected final int endOfMessage;
     protected final Set<Integer> stopTokens;
+    protected final ChatTokens chatTokens;
 
     public OlmoChatFormat(Tokenizer tokenizer) {
+        this(tokenizer, null);
+    }
+
+    public OlmoChatFormat(Tokenizer tokenizer, ChatTokens chatTokens) {
         this.tokenizer = tokenizer;
+        this.chatTokens = chatTokens;
 
         Map<String, Integer> specialTokens = tokenizer.getSpecialTokens();
 
-        // OLMo special tokens
-        this.beginOfText = specialTokens.getOrDefault("<|endoftext|>", 50279);  // OLMo uses EOS as BOT
-        this.endOfText = specialTokens.getOrDefault("<|endoftext|>", 50279);
-        this.startHeader = specialTokens.getOrDefault("<|user|>", -1);
-        this.endHeader = specialTokens.getOrDefault("<|assistant|>", -1);
-        this.endOfTurn = endOfText;  // Use EOS for end of turn
-        this.endOfMessage = endOfText;
+        // Use chatTokens if provided, otherwise use OLMo defaults
+        if (chatTokens != null) {
+            System.out.println("[OLMO-CHAT-FORMAT] Using custom chat tokens for Tulu template");
+            // For Tulu template, we don't need special token IDs - we'll encode the strings directly
+            this.beginOfText = specialTokens.getOrDefault("<|endoftext|>", 50279);
+            this.endOfText = specialTokens.getOrDefault("<|endoftext|>", 50279);
+            this.startHeader = -1;  // Will use string encoding
+            this.endHeader = -1;    // Will use string encoding
+            this.endOfTurn = endOfText;
+            this.endOfMessage = endOfText;
+        } else {
+            // Original OLMo special tokens
+            this.beginOfText = specialTokens.getOrDefault("<|endoftext|>", 50279);  // OLMo uses EOS as BOT
+            this.endOfText = specialTokens.getOrDefault("<|endoftext|>", 50279);
+            this.startHeader = specialTokens.getOrDefault("<|user|>", -1);
+            this.endHeader = specialTokens.getOrDefault("<|assistant|>", -1);
+            this.endOfTurn = endOfText;  // Use EOS for end of turn
+            this.endOfMessage = endOfText;
+        }
 
         // Configure stop tokens for OLMo
         this.stopTokens = new HashSet<>();
