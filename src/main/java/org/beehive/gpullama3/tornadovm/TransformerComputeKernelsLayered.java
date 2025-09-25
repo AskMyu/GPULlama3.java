@@ -962,7 +962,8 @@ public class TransformerComputeKernelsLayered {
         if (rowId >= dim0) {
             return;
         }
-        float sum = matrixVectorColumnMajorOptimized(context, localSize, x, w, dim1, dim0, rowId);
+        // Use row-major access for standard models (PHI3, Gemma, LLaMA, etc.)
+        float sum = matrixVectorRowMajorOptimized(context, localSize, x, w, dim1);
 
         // Thread 0 in each workgroup writes the final result
         if (localId == 0) {
