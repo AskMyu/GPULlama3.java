@@ -27,6 +27,12 @@ public class OlmoeState extends State {
     // Load balancing tracking
     public IntArray[] expertLoadCounts;      // Number of tokens routed to each expert
     public FloatArray routerAuxLoss;         // Auxiliary loss for load balancing
+
+    // EXPERT CONSISTENCY: Batch processing support for solving context isolation
+    public boolean batchExpertConsistencyMode = false;    // Enable shared expert routing
+    public boolean[] sharedExpertsEstablished;            // Flag per layer if shared experts are set
+    public int[][] sharedExpertsPerLayer;                 // Shared experts per layer [layers][top_k]
+    public float[][] sharedExpertWeightsPerLayer;         // Shared expert weights per layer [layers][top_k]
     
     // Configuration
     private final OlmoeConfiguration config;
@@ -104,6 +110,11 @@ public class OlmoeState extends State {
         expertOutputs = new FloatArray[numLayers];
         expertLoadCounts = new IntArray[numLayers];
         
+        // Initialize expert consistency arrays
+        sharedExpertsEstablished = new boolean[numLayers];
+        sharedExpertsPerLayer = new int[numLayers][topK];
+        sharedExpertWeightsPerLayer = new float[numLayers][topK];
+
         for (int i = 0; i < numLayers; i++) {
             // Router logits for all experts
             expertRouterLogits[i] = new FloatArray(maxSeqLen * numExperts);

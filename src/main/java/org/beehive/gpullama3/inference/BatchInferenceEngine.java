@@ -6,7 +6,7 @@ import org.beehive.gpullama3.model.Model;
 import org.beehive.gpullama3.inference.state.State;
 import org.beehive.gpullama3.model.olmoe.Olmoe;
 import org.beehive.gpullama3.inference.state.OlmoeState;
-import org.beehive.gpullama3.model.olmoe.OLMoEBatchProcessor;
+import org.beehive.gpullama3.model.olmoe.OLMoEBatchProcessorSimple;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -51,7 +51,7 @@ public class BatchInferenceEngine {
                 public State processBatch(State state, List<Integer> promptTokens, int startPosition) {
                     if (state instanceof OlmoeState) {
                         // Use OLMoE-specific batch processing for context preservation
-                        OLMoEBatchProcessor olmoeProcessor = new OLMoEBatchProcessor(
+                        OLMoEBatchProcessorSimple olmoeProcessor = new OLMoEBatchProcessorSimple(
                             olmoeModel,
                             olmoeModel.configuration(),
                             olmoeModel.weights(),

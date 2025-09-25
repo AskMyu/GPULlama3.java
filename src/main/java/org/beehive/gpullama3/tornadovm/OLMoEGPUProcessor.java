@@ -57,6 +57,9 @@ public class OLMoEGPUProcessor {
     private OlmoeTornadoWeights currentWeights = null;
     private int currentLayer = -1;
 
+    // Current state reference for expert consistency
+    private Object currentState = null;
+
     private boolean initialized = false;
 
     // Resource pool to reuse TaskGraphs and avoid memory leaks
@@ -505,13 +508,77 @@ public class OLMoEGPUProcessor {
                                  layer, memoryManager.getStrategy()));
 
         try {
-            // Step 1: Router computation to get expert weights
-            float[] routerData = computeRealRouterLogits(input, layer, weights);
+            // Step 1: Check if we're in batch expert consistency mode
+            OlmoeState olmoeState = (currentState instanceof OlmoeState) ? (OlmoeState) currentState : null;
+            boolean useBatchConsistency = (olmoeState != null &&
+                                         olmoeState.batchExpertConsistencyMode &&
+                                         olmoeState.sharedExpertsEstablished != null &&
+                                         layer < olmoeState.sharedExpertsEstablished.length);
 
-            // Step 2: Select top-k experts
             int[] selectedExperts = new int[topK];
             float[] expertWeightValues = new float[topK];
-            selectTopKExperts(routerData, selectedExperts, expertWeightValues);
+
+            if (useBatchConsistency && olmoeState.sharedExpertsEstablished[layer]) {
+                // CRITICAL FIX: Use shared experts for context consistency
+                // Validate array bounds before copy
+                if (olmoeState.sharedExpertsPerLayer[layer].length >= topK &&
+                    olmoeState.sharedExpertWeightsPerLayer[layer].length >= topK) {
+                    System.arraycopy(olmoeState.sharedExpertsPerLayer[layer], 0, selectedExperts, 0, topK);
+                    System.arraycopy(olmoeState.sharedExpertWeightsPerLayer[layer], 0, expertWeightValues, 0, topK);
+                } else {
+                    // Fallback to normal routing if arrays are invalid
+                    float[] routerData = computeRealRouterLogits(input, layer, weights);
+                    selectTopKExperts(routerData, selectedExperts, expertWeightValues);
+                    System.err.printf("[EXPERT-CONSISTENCY] layer=%d, pos=%d, token=%d, FALLBACK_TO_NORMAL_ROUTING (invalid arrays)%n",
+                        layer, currentPosition, currentToken);
+                }
+
+                System.err.printf("[EXPERT-CONSISTENCY] layer=%d, pos=%d, token=%d, USING_SHARED_EXPERTS=[%d,%d,%d,%d,%d,%d,%d,%d]%n",
+                    layer, currentPosition, currentToken,
+                    selectedExperts[0], selectedExperts[1], selectedExperts[2], selectedExperts[3],
+                    selectedExperts[4], selectedExperts[5], selectedExperts[6], selectedExperts[7]);
+            } else {
+                // Step 1: Router computation to get expert weights
+                float[] routerData = computeRealRouterLogits(input, layer, weights);
+
+                // Step 2: Select top-k experts
+                selectTopKExperts(routerData, selectedExperts, expertWeightValues);
+
+                // ⚡ CRITICAL DIAGNOSTIC: Router logits analysis (moved here where routerData is available)
+                float maxLogit = routerData[0], minLogit = routerData[0];
+                for (int i = 1; i < routerData.length; i++) {
+                    if (routerData[i] > maxLogit) maxLogit = routerData[i];
+                    if (routerData[i] < minLogit) minLogit = routerData[i];
+                }
+                System.err.printf("[ROUTER-LOGITS] layer=%d, pos=%d, token=%d, logit_range=[%.6f,%.6f], entropy=%.6f%n",
+                    layer, currentPosition, currentToken, minLogit, maxLogit, calculateEntropy(routerData));
+
+                // Store as shared experts if we're establishing them
+                if (useBatchConsistency && !olmoeState.sharedExpertsEstablished[layer]) {
+                    // Validate expert indices before storing
+                    boolean validExperts = true;
+                    for (int i = 0; i < topK; i++) {
+                        if (selectedExperts[i] < 0 || selectedExperts[i] >= numExperts) {
+                            validExperts = false;
+                            break;
+                        }
+                    }
+
+                    if (validExperts) {
+                        System.arraycopy(selectedExperts, 0, olmoeState.sharedExpertsPerLayer[layer], 0, topK);
+                        System.arraycopy(expertWeightValues, 0, olmoeState.sharedExpertWeightsPerLayer[layer], 0, topK);
+                        olmoeState.sharedExpertsEstablished[layer] = true;
+                    } else {
+                        System.err.printf("[EXPERT-CONSISTENCY] layer=%d, pos=%d, token=%d, INVALID_EXPERTS - not storing as shared%n",
+                            layer, currentPosition, currentToken);
+                    }
+
+                    System.err.printf("[EXPERT-CONSISTENCY] layer=%d, pos=%d, token=%d, ESTABLISHING_SHARED_EXPERTS=[%d,%d,%d,%d,%d,%d,%d,%d]%n",
+                        layer, currentPosition, currentToken,
+                        selectedExperts[0], selectedExperts[1], selectedExperts[2], selectedExperts[3],
+                        selectedExperts[4], selectedExperts[5], selectedExperts[6], selectedExperts[7]);
+                }
+            }
 
             // ⚡ CRITICAL DIAGNOSTIC: Expert routing analysis for context isolation hypothesis
             System.err.printf("[EXPERT-ROUTING] layer=%d, pos=%d, token=%d, selected_experts=[%d,%d,%d,%d,%d,%d,%d,%d], weights=[%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f]%n",
@@ -520,15 +587,6 @@ public class OLMoEGPUProcessor {
                 selectedExperts[4], selectedExperts[5], selectedExperts[6], selectedExperts[7],
                 expertWeightValues[0], expertWeightValues[1], expertWeightValues[2], expertWeightValues[3],
                 expertWeightValues[4], expertWeightValues[5], expertWeightValues[6], expertWeightValues[7]);
-
-            // ⚡ CRITICAL DIAGNOSTIC: Router logits analysis
-            float maxLogit = routerData[0], minLogit = routerData[0];
-            for (int i = 1; i < routerData.length; i++) {
-                if (routerData[i] > maxLogit) maxLogit = routerData[i];
-                if (routerData[i] < minLogit) minLogit = routerData[i];
-            }
-            System.err.printf("[ROUTER-LOGITS] layer=%d, pos=%d, token=%d, logit_range=[%.6f,%.6f], entropy=%.6f%n",
-                layer, currentPosition, currentToken, minLogit, maxLogit, calculateEntropy(routerData));
 
             // Step 3: Process selected experts with real weights
             FloatArray result = new FloatArray(dim);
@@ -1417,6 +1475,9 @@ public class OLMoEGPUProcessor {
         if (!memoryManager.isInitialized()) {
             memoryManager.initialize();
         }
+
+        // Store current state for expert consistency support
+        this.currentState = state;
 
         // Update configuration from actual config
         this.dim = config.dim();

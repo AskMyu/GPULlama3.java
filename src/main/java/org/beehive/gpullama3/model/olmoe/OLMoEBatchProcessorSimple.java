@@ -43,15 +43,35 @@ public class OLMoEBatchProcessorSimple implements BatchCapableModel {
         }
 
         try {
-            // COMPLETE SOLUTION: Process tokens sequentially to maintain expert routing context
-            // This leverages the existing, proven forward() method which handles all the complex logic:
-            // - GPU acceleration with TornadoVM
-            // - Expert routing and MoE operations
-            // - KV cache management
-            // - Proper state updates
+            // CRITICAL FIX: EXPERT CONSISTENCY BATCH PROCESSING
+            // Enable expert consistency mode and process all tokens with shared experts
 
-            System.err.printf("[OLMOE-BATCH] Processing tokens sequentially for expert context coherence%n");
+            if (!(state instanceof org.beehive.gpullama3.inference.state.OlmoeState)) {
+                throw new RuntimeException("OLMoE batch processor requires OlmoeState");
+            }
 
+            if (tokens == null || tokens.isEmpty()) {
+                throw new RuntimeException("Cannot process empty token list");
+            }
+
+            org.beehive.gpullama3.inference.state.OlmoeState olmoeState =
+                (org.beehive.gpullama3.inference.state.OlmoeState) state;
+
+            System.err.printf("[OLMOE-BATCH] 🎯 ENABLING EXPERT CONSISTENCY MODE FOR %d TOKENS%n", tokens.size());
+
+            // STEP 1: Enable expert consistency mode
+            olmoeState.batchExpertConsistencyMode = true;
+
+            // STEP 2: Clear any existing shared experts (reset for new batch)
+            for (int layer = 0; layer < model.configuration().numberOfLayers(); layer++) {
+                olmoeState.sharedExpertsEstablished[layer] = false;
+                for (int k = 0; k < model.configuration().numberOfActiveExperts(); k++) {
+                    olmoeState.sharedExpertsPerLayer[layer][k] = 0;
+                    olmoeState.sharedExpertWeightsPerLayer[layer][k] = 0.0f;
+                }
+            }
+
+            // STEP 3: Process tokens - first token establishes experts, rest use shared experts
             for (int i = 0; i < tokens.size(); i++) {
                 int token = tokens.get(i);
                 int position = startPosition + i;
@@ -61,9 +81,20 @@ public class OLMoEBatchProcessorSimple implements BatchCapableModel {
                                     i + 1, tokens.size(), token, position);
                 }
 
-                // Use the existing, proven forward method - NO PLACEHOLDERS
+                if (i == 0) {
+                    System.err.printf("[OLMOE-BATCH] 🔧 Token 1: ESTABLISHING shared experts for all layers%n");
+                } else {
+                    System.err.printf("[OLMOE-BATCH] 🔧 Token %d: USING shared experts for consistency%n", i + 1);
+                }
+
+                // Process token - the OLMoEGPUProcessor will handle expert consistency automatically
                 model.forward(state, token, position);
             }
+
+            // STEP 4: Disable expert consistency mode after batch processing
+            olmoeState.batchExpertConsistencyMode = false;
+
+            System.err.printf("[OLMOE-BATCH] ✅ EXPERT CONSISTENCY BATCH PROCESSING COMPLETED%n");
 
             if (debugLogging) {
                 System.out.printf("[OLMOE-BATCH] ✅ Processed %d tokens with expert routing context preservation%n",
