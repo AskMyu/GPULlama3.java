@@ -2278,7 +2278,7 @@ public final class InferenceCore {
         processor.initialize((OlmoeState) state, config);
 
         for (int layer = 0; layer < config.numberOfLayers(); layer++) {
-            processor.processTransformerLayer(layer, position, state, olmoeWeights, config);
+            processor.processTransformerLayer(layer, position, token, state, olmoeWeights, config);
         }
 
         processor.processFinalization(state, olmoeWeights, config);

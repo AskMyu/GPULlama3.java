@@ -675,6 +675,8 @@ public final class InferenceEngine {
         boolean isOlmoeModel = model.getClass().getSimpleName().equals("Olmoe");
         System.err.printf("[GPU-PROMPT-DEBUG] Model: %s, using standard prompt processing, latestToken: %d%n",
                          model.getClass().getSimpleName(), currentToken);
+        System.err.printf("[BOUNDARY-FIX-DEBUG] OLMoE model: %s, initial currentToken: %d%n",
+                         isOlmoeModel, currentToken);
 
         // Use more efficient direct array access for prompt tokens if possible
         int[] promptTokenArray = null;
@@ -713,8 +715,22 @@ public final class InferenceEngine {
             }
 
             // GPU Forward Pass - Call model.forward() to handle model-specific logic (e.g., OLMoE routing)
-            System.err.printf("[INFERENCE-DEBUG] About to call model.forward(): currentToken=%d, pos=%d%n", currentToken, pos);
-            model.forward(state, currentToken, pos);
+            // CRITICAL FIX: Use actual prompt tokens during prompt processing instead of stuck currentToken
+            int tokenForForward;
+            if (promptIndex < promptTokens.size()) {
+                // During prompt processing: use actual prompt tokens
+                tokenForForward = promptTokens.get(promptIndex);
+                System.err.printf("[PROMPT-TOKEN-FIX] Using prompt token %d for forward pass at pos=%d (promptIndex=%d)%n",
+                                 tokenForForward, pos, promptIndex);
+            } else {
+                // During generation: use currentToken (sampled tokens)
+                tokenForForward = currentToken;
+                System.err.printf("[GENERATION-TOKEN] Using sampled token %d for forward pass at pos=%d%n",
+                                 tokenForForward, pos);
+            }
+
+            System.err.printf("[INFERENCE-DEBUG] About to call model.forward(): tokenForForward=%d, pos=%d%n", tokenForForward, pos);
+            model.forward(state, tokenForForward, pos);
             FloatArray logits = state.wrapLogits;
 
             // 🔍 PROGRESSIVE STATE DEBUG - After forward pass
@@ -863,7 +879,17 @@ public final class InferenceEngine {
             }
 
             // Update for next iteration
-            currentToken = nextToken;
+            // CRITICAL FIX: Only update currentToken with sampled tokens, not prompt tokens
+            if (promptIndex >= promptTokens.size()) {
+                // During generation phase: use sampled tokens
+                currentToken = nextToken;
+                System.err.printf("[GENERATION-FIX] Updated currentToken to sampled token: %d at pos=%d%n",
+                                 currentToken, pos);
+            } else {
+                // During prompt phase: keep currentToken unchanged, let forward pass handle prompt tokens
+                System.err.printf("[PROMPT-FIX] Keeping currentToken=%d unchanged during prompt processing at pos=%d, nextToken=%d%n",
+                                 currentToken, pos, nextToken);
+            }
             state.latestToken = currentToken;
             pos++;
 

@@ -48,6 +48,8 @@ public class OLMoEGPUProcessor {
     private int hiddenSize;
     private int intermediateSize;
     private int numExperts;
+    private int currentPosition; // ⚡ DIAGNOSTIC: Track current position for expert routing analysis
+    private int currentToken; // ⚡ DIAGNOSTIC: Track current token for expert routing analysis
     private int topK;
     private float rmsNormEps;
 
@@ -238,6 +240,32 @@ public class OLMoEGPUProcessor {
 
         // Log processing statistics
         logLayerProcessingStats(layer, position);
+    }
+
+    /**
+     * ⚡ DIAGNOSTIC HELPER: Calculate entropy of router logits to measure expert selection diversity
+     */
+    private float calculateEntropy(float[] logits) {
+        // Apply softmax to get probabilities
+        float maxLogit = logits[0];
+        for (int i = 1; i < logits.length; i++) {
+            if (logits[i] > maxLogit) maxLogit = logits[i];
+        }
+
+        float sumExp = 0.0f;
+        for (int i = 0; i < logits.length; i++) {
+            sumExp += (float) Math.exp(logits[i] - maxLogit);
+        }
+
+        // Calculate entropy: -Σ(p * log(p))
+        float entropy = 0.0f;
+        for (int i = 0; i < logits.length; i++) {
+            float prob = (float) Math.exp(logits[i] - maxLogit) / sumExp;
+            if (prob > 1e-8) { // Avoid log(0)
+                entropy -= prob * (float) Math.log(prob);
+            }
+        }
+        return entropy;
     }
 
     private void processInputNormalization(FloatArray input, int layer,
@@ -484,6 +512,23 @@ public class OLMoEGPUProcessor {
             int[] selectedExperts = new int[topK];
             float[] expertWeightValues = new float[topK];
             selectTopKExperts(routerData, selectedExperts, expertWeightValues);
+
+            // ⚡ CRITICAL DIAGNOSTIC: Expert routing analysis for context isolation hypothesis
+            System.err.printf("[EXPERT-ROUTING] layer=%d, pos=%d, token=%d, selected_experts=[%d,%d,%d,%d,%d,%d,%d,%d], weights=[%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                layer, currentPosition, currentToken,
+                selectedExperts[0], selectedExperts[1], selectedExperts[2], selectedExperts[3],
+                selectedExperts[4], selectedExperts[5], selectedExperts[6], selectedExperts[7],
+                expertWeightValues[0], expertWeightValues[1], expertWeightValues[2], expertWeightValues[3],
+                expertWeightValues[4], expertWeightValues[5], expertWeightValues[6], expertWeightValues[7]);
+
+            // ⚡ CRITICAL DIAGNOSTIC: Router logits analysis
+            float maxLogit = routerData[0], minLogit = routerData[0];
+            for (int i = 1; i < routerData.length; i++) {
+                if (routerData[i] > maxLogit) maxLogit = routerData[i];
+                if (routerData[i] < minLogit) minLogit = routerData[i];
+            }
+            System.err.printf("[ROUTER-LOGITS] layer=%d, pos=%d, token=%d, logit_range=[%.6f,%.6f], entropy=%.6f%n",
+                layer, currentPosition, currentToken, minLogit, maxLogit, calculateEntropy(routerData));
 
             // Step 3: Process selected experts with real weights
             FloatArray result = new FloatArray(dim);
@@ -1394,14 +1439,16 @@ public class OLMoEGPUProcessor {
     /**
      * Process a single transformer layer using proper TornadoVM GPU kernels
      */
-    public void processTransformerLayer(int layer, int position,
+    public void processTransformerLayer(int layer, int position, int token,
                                       OlmoeState state, OlmoeTornadoWeights weights, OlmoeConfiguration config) {
-        System.out.printf("[TRANSFORM-LAYER-DEBUG] Layer %d called with position %d%n", layer, position);
+        System.out.printf("[TRANSFORM-LAYER-DEBUG] Layer %d called with position %d, token %d%n", layer, position, token);
         logger.fine(String.format("[OLMOE-GPU] Processing transformer layer %d (position %d) with strategy %s",
                                  layer, position, memoryManager.getStrategy()));
 
         this.currentWeights = weights;
         this.currentLayer = layer;
+        this.currentPosition = position; // ⚡ DIAGNOSTIC: Update current position for expert routing
+        this.currentToken = token; // ⚡ DIAGNOSTIC: Update current token for expert routing analysis
 
         // Get current hidden state
         FloatArray layerInput = state.wrapX; // Current hidden state
