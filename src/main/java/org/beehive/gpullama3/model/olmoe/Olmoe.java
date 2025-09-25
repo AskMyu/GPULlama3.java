@@ -14,6 +14,7 @@ import org.beehive.gpullama3.tornadovm.TornadoVMMasterPlan;
 
 import java.util.List;
 import java.util.Set;
+import java.util.ArrayList;
 import java.util.function.IntConsumer;
 
 /**
@@ -156,7 +157,75 @@ public class Olmoe extends AbstractModel {
             olmoeState.clearKVCache();
         }
 
-        // OLMoE-specific GPU token generation
+        // Check if batch processing is enabled via system property or configuration
+        boolean batchEnabled = Boolean.parseBoolean(System.getProperty("olmoe.batch.enabled", "true"));
+        System.err.printf("[OLMOE-BATCH] Batch processing flag: %s%n", batchEnabled);
+
+        if (batchEnabled) {
+            // 🚀 BATCH PROCESSING FOR OLMOE: Two-phase approach like llama.cpp
+            System.err.println("[OLMOE-BATCH] 🎯 ACTIVATING BATCH PROCESSING TO SOLVE EXPERT ROUTING CONTEXT ISOLATION");
+
+            try {
+                // PHASE 1: Batch process the entire prompt using OLMoEBatchProcessor
+                System.err.printf("[OLMOE-BATCH] Phase 1: Batch processing prompt (%d tokens)%n", promptTokens.size());
+
+                org.beehive.gpullama3.model.olmoe.OLMoEBatchProcessorSimple batchProcessor =
+                    new org.beehive.gpullama3.model.olmoe.OLMoEBatchProcessorSimple(
+                        this, configuration(), weights(), true, 512);
+
+                // Process entire prompt in batch to build proper context with expert consistency
+                state = batchProcessor.forwardBatch(state, promptTokens, startPosition);
+
+                System.err.printf("[OLMOE-BATCH] ✅ Phase 1 completed: %d tokens processed in batch%n", promptTokens.size());
+
+                // PHASE 2: Serial generation using the original GPU method with proper context
+                System.err.printf("[OLMOE-BATCH] Phase 2: Serial generation from position %d%n", startPosition + promptTokens.size());
+
+                int newStartPosition = startPosition + promptTokens.size();
+                int remainingMaxTokens = Math.max(0, maxTokens - promptTokens.size());
+
+                if (remainingMaxTokens > 0) {
+                    // Use original OLMoE GPU generation for the serial phase
+                    List<Integer> serialTokens = InferenceEngine.generateTokensGPUOlmoe(
+                        this, (OlmoeState) state, newStartPosition,
+                        new ArrayList<>(), // Empty prompt tokens since we already processed the prompt
+                        stopTokens, remainingMaxTokens, sampler, false, // echo=false for generation phase
+                        onTokenGenerated, tornadoVMPlan);
+
+                    System.err.printf("[OLMOE-BATCH] ✅ Phase 2 completed: %d tokens generated serially%n", serialTokens.size());
+
+                    // Combine prompt and generated tokens based on echo setting
+                    List<Integer> responseTokens = new ArrayList<>();
+                    if (echo) {
+                        responseTokens.addAll(promptTokens);
+                    }
+                    responseTokens.addAll(serialTokens);
+
+                    System.err.printf("[OLMOE-BATCH] ✅ BATCH PROCESSING COMPLETED: %d total tokens%n", responseTokens.size());
+                    return responseTokens;
+                } else {
+                    // No generation needed, just return prompt tokens if echo is enabled
+                    List<Integer> responseTokens = new ArrayList<>();
+                    if (echo) {
+                        responseTokens.addAll(promptTokens);
+                    }
+                    System.err.printf("[OLMOE-BATCH] ✅ BATCH PROCESSING COMPLETED: %d prompt tokens (no generation)%n", responseTokens.size());
+                    return responseTokens;
+                }
+
+            } catch (Exception e) {
+                System.err.printf("[OLMOE-BATCH] ❌ Batch processing failed: %s%n", e.getMessage());
+                System.err.println("[OLMOE-BATCH] 🔄 Falling back to original OLMoE generation");
+                e.printStackTrace();
+
+                // Fall through to serial processing
+            }
+        } else {
+            System.err.println("[OLMOE-BATCH] 🔄 Batch processing DISABLED - using serial processing");
+        }
+
+        // SERIAL PROCESSING: Original OLMoE generation (used when batch disabled or as fallback)
+        System.err.println("[OLMOE-BATCH] 📋 Using original serial OLMoE generation");
         return InferenceEngine.generateTokensGPUOlmoe(this, (OlmoeState) state, startPosition,
                 promptTokens, stopTokens, maxTokens, sampler, echo, onTokenGenerated, tornadoVMPlan);
     }

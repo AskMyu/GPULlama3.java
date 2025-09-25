@@ -11,7 +11,7 @@ import org.beehive.gpullama3.model.format.ChatFormat;
 import org.beehive.gpullama3.model.format.ChatFormat.ChatTokens;
 import org.beehive.gpullama3.model.gptoss.GptOss;
 import org.beehive.gpullama3.model.gptoss.GptOssConfiguration;
-import org.beehive.gpullama3.model.loader.batch.BatchCapableModelLoader;
+// Removed BatchCapableModelLoader import - GptOss should use standard ModelLoader
 import org.beehive.gpullama3.tokenizer.impl.Tokenizer;
 import org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary;
 import org.beehive.gpullama3.core.types.Pair;
@@ -48,7 +48,7 @@ import static org.beehive.gpullama3.tokenizer.vocabulary.Vocabulary.loadOlmoeVoc
  * - ffn_up_exps: 531MB each
  * - Total expert tensor memory: ~38GB across all layers
  */
-public class GptOssModelLoader extends BatchCapableModelLoader {
+public class GptOssModelLoader extends ModelLoader {
     // Cache for converted tensors to avoid duplicate conversions
     private final Map<FloatTensor, uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray> conversionCache = new HashMap<>();
 
@@ -193,69 +193,11 @@ public class GptOssModelLoader extends BatchCapableModelLoader {
         return metadata.containsKey(key) ? (Boolean) metadata.get(key) : defaultValue;
     }
 
-    // Implementation of abstract methods from BatchCapableModelLoader
-
     /**
-     * GPT-OSS specific check for tensors requiring special handling.
-     * Expert tensors (ffn_*_exps) require specialized allocation due to large size (531MB each).
+     * Weight loading method using standard ModelLoader approach.
      */
     @Override
-    protected boolean requiresSpecialHandling(String tensorName) {
-        return Arrays.stream(GPT_OSS_EXPERT_PATTERNS)
-                    .anyMatch(tensorName::contains);
-    }
-
-    /**
-     * Returns GPT-OSS expert tensor patterns for additional validation.
-     */
-    @Override
-    protected String[] getModelSpecificExpertPatterns() {
-        return GPT_OSS_EXPERT_PATTERNS;
-    }
-
-    /**
-     * Creates GPT-OSS weights from loaded tensors using existing infrastructure.
-     */
-    @Override
-    protected Weights createWeightsFromTensors(Map<String, FloatTensor> tensors, Configuration config) {
-        System.err.printf("[GPT-OSS-WEIGHTS] Creating weights from %d loaded tensors%n", tensors.size());
-
-        GptOssConfiguration gptOssConfig = (GptOssConfiguration) config;
-
-        // Pre-compute RoPE frequencies for GPT-OSS (same as legacy method)
-        Pair<float[], float[]> ropeFreqs = RoPE.precomputeFreqsCis(
-                config.contextLength(),
-                config.headSize(),
-                gptOssConfig.ropeTheta(),
-                false,
-                0, 0, 0, 0
-        );
-
-        // Get essential tensors from loaded tensor map
-        FloatTensor tokenEmbeddings = tensors.get("token_embd.weight");
-        FloatTensor outputWeight = tensors.getOrDefault("output.weight", tokenEmbeddings);
-
-        System.err.printf("[GPT-OSS-WEIGHTS] Essential tensors: token_embd=%s, output=%s%n",
-                         tokenEmbeddings != null ? "found" : "missing",
-                         outputWeight != null ? "found" : "missing");
-
-        // Create weights using existing infrastructure
-        if (Options.getDefaultOptions().useTornadovm()) {
-            if (TornadoVMMasterPlan.ENABLE_TORNADOVM_INIT_TIME) {
-                System.out.println("Creating GPT-OSS weights in TornadoVM format from loaded tensors");
-            }
-            return createTornadoVMWeightsFromTensors(tensors, config, ropeFreqs, tokenEmbeddings, outputWeight);
-        } else {
-            System.err.println("[GPT-OSS-WEIGHTS] Creating standard weights from loaded tensors");
-            return createStandardWeightsFromTensors(tensors, config, ropeFreqs, tokenEmbeddings, outputWeight);
-        }
-    }
-
-    /**
-     * Legacy weight loading method - now replaced by BatchCapableModelLoader.
-     * Keeping for reference during transition period.
-     */
-    public Weights loadWeightsLegacy(Map<String, GGMLTensorEntry> tensorEntries, Configuration config) {
+    public Weights loadWeights(Map<String, GGMLTensorEntry> tensorEntries, Configuration config) {
         GptOssConfiguration gptOssConfig = (GptOssConfiguration) config;
 
         System.err.printf("[GPT-OSS-LOADER] Loading GPT-OSS 20B MoE model with %d experts (%d active)%n",
