@@ -125,13 +125,16 @@ public class Olmoe extends AbstractModel {
 
     @Override
     public void forward(State state, int token, int position) {
+        System.err.printf("[EXECUTION-PATH-DEBUG] ✅ Olmoe.forward() CALLED with token=%d, position=%d%n", token, position);
         System.err.printf("[OLMOE-FORWARD-DEBUG] plan=%s, tornadoVMPlan()=%s%n",
                          plan, (plan != null) ? "available" : "null");
 
         // CRITICAL FIX: Always use our fixed OLMoE implementation regardless of plan status
         // This ensures our state management fix is used instead of generic TornadoVM kernels
         System.err.println("[OLMOE-FORWARD-DEBUG] Using OLMoE-specific GPU forward pass with fixed state management");
+        System.err.println("[EXECUTION-PATH-DEBUG] 🚀 About to call forwardTornadoVMOlmoe...");
         InferenceCore.forwardTornadoVMOlmoe(this, (OlmoeState) state, token, position, tornadoVMPlan());
+        System.err.println("[EXECUTION-PATH-DEBUG] ✅ Returned from forwardTornadoVMOlmoe");
     }
 
     @Override

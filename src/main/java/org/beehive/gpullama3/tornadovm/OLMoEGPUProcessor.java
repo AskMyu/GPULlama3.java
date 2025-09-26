@@ -305,6 +305,9 @@ public class OLMoEGPUProcessor {
             normalizedKey.set(i, key.get(i));
         }
 
+        // Step 2: Q/K normalization (CRITICAL OLMoE component)
+        System.err.printf("[ATTENTION-DEBUG] Step 2: Applying Q/K normalization...%n");
+
         // Get real Q/K normalization weights from model weights
         FloatArray qNormWeightsArray = weights.getAttnQNormWeights(layer);
         FloatArray kNormWeightsArray = weights.getAttnKNormWeights(layer);
@@ -312,13 +315,33 @@ public class OLMoEGPUProcessor {
         FloatArray qNormWeights = qNormWeightsArray;
         FloatArray kNormWeights = kNormWeightsArray;
 
+        // DEBUG: Check normalization weights
+        System.err.printf("[ATTENTION-DEBUG] Q_NORM_WEIGHTS: first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          qNormWeights.get(0), qNormWeights.get(1), qNormWeights.get(2), qNormWeights.get(3), qNormWeights.get(4));
+        System.err.printf("[ATTENTION-DEBUG] K_NORM_WEIGHTS: first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          kNormWeights.get(0), kNormWeights.get(1), kNormWeights.get(2), kNormWeights.get(3), kNormWeights.get(4));
+
         // Apply normalization to the normalized tensors (in-place)
+        System.err.printf("[ATTENTION-DEBUG] Calling TornadoVMQKNormKernel...%n");
         TornadoVMQKNormKernel.applyOLMoEQKNormalization(
             normalizedQuery, normalizedKey,
             qNormWeights, kNormWeights,
             dim, 1, // Single token processing
             rmsNormEps
         );
+
+        // DEBUG: Post-normalization Q/K analysis
+        float qNormMin = normalizedQuery.get(0), qNormMax = normalizedQuery.get(0);
+        float kNormMin = normalizedKey.get(0), kNormMax = normalizedKey.get(0);
+        for (int i = 1; i < Math.min(100, normalizedQuery.getSize()); i++) {
+            float qVal = normalizedQuery.get(i), kVal = normalizedKey.get(i);
+            if (qVal < qNormMin) qNormMin = qVal; if (qVal > qNormMax) qNormMax = qVal;
+            if (kVal < kNormMin) kNormMin = kVal; if (kVal > kNormMax) kNormMax = kVal;
+        }
+        System.err.printf("[ATTENTION-DEBUG] NORM_QUERY: range=[%.6f,%.6f] first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          qNormMin, qNormMax, normalizedQuery.get(0), normalizedQuery.get(1), normalizedQuery.get(2), normalizedQuery.get(3), normalizedQuery.get(4));
+        System.err.printf("[ATTENTION-DEBUG] NORM_KEY  : range=[%.6f,%.6f] first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          kNormMin, kNormMax, normalizedKey.get(0), normalizedKey.get(1), normalizedKey.get(2), normalizedKey.get(3), normalizedKey.get(4));
 
         // Step 3: CRITICAL - Reshape to 3D (heads) BEFORE RoPE (matches llama.cpp exactly)
         int numHeads = config.numberOfHeads();
@@ -335,6 +358,17 @@ public class OLMoEGPUProcessor {
         // Step 5: Apply attention computation with 3D tensors (matches llama.cpp build_attn)
         FloatArray attentionOutput = computeAttentionWithKVCache(reshapedQuery, reshapedKey, reshapedValue,
                                                                layer, position, weights, config, state);
+
+        // DEBUG: Final attention output analysis
+        float outMin = attentionOutput.get(0), outMax = attentionOutput.get(0), outSum = 0.0f;
+        for (int i = 0; i < Math.min(100, attentionOutput.getSize()); i++) {
+            float val = attentionOutput.get(i);
+            outSum += Math.abs(val);
+            if (val < outMin) outMin = val;
+            if (val > outMax) outMax = val;
+        }
+        System.err.printf("[ATTENTION-DEBUG] FINAL_OUTPUT: range=[%.6f,%.6f] sum=%.6f first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          outMin, outMax, outSum, attentionOutput.get(0), attentionOutput.get(1), attentionOutput.get(2), attentionOutput.get(3), attentionOutput.get(4));
 
         logger.fine(String.format("[OLMOE-GPU] Layer %d: ✅ Q/K normalization applied", layer));
         return attentionOutput;
@@ -504,8 +538,20 @@ public class OLMoEGPUProcessor {
 
     private FloatArray processMoEExpertsGPU(FloatArray input, int layer,
                                           OlmoeTornadoWeights weights, OlmoeConfiguration config) {
+        System.err.printf("[MOE-DEBUG] ===== LAYER %d MOE PROCESSING =====%n", layer);
         logger.fine(String.format("[OLMOE-GPU] Layer %d: MoE expert processing (%s strategy)",
                                  layer, memoryManager.getStrategy()));
+
+        // DEBUG: Input analysis
+        float inputMin = input.get(0), inputMax = input.get(0), inputSum = 0.0f;
+        for (int i = 0; i < Math.min(100, input.getSize()); i++) {
+            float val = input.get(i);
+            inputSum += Math.abs(val);
+            if (val < inputMin) inputMin = val;
+            if (val > inputMax) inputMax = val;
+        }
+        System.err.printf("[MOE-DEBUG] INPUT: range=[%.6f,%.6f] sum=%.6f first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          inputMin, inputMax, inputSum, input.get(0), input.get(1), input.get(2), input.get(3), input.get(4));
 
         try {
             // Step 1: Check if we're in batch expert consistency mode
@@ -539,10 +585,30 @@ public class OLMoEGPUProcessor {
                     selectedExperts[4], selectedExperts[5], selectedExperts[6], selectedExperts[7]);
             } else {
                 // Step 1: Router computation to get expert weights
+                System.err.printf("[MOE-DEBUG] Step 1: Computing router logits...%n");
                 float[] routerData = computeRealRouterLogits(input, layer, weights);
 
+                // DEBUG: Router logits analysis
+                float routerMin = routerData[0], routerMax = routerData[0];
+                for (int i = 1; i < Math.min(10, routerData.length); i++) {
+                    if (routerData[i] < routerMin) routerMin = routerData[i];
+                    if (routerData[i] > routerMax) routerMax = routerData[i];
+                }
+                System.err.printf("[MOE-DEBUG] ROUTER_LOGITS: range=[%.6f,%.6f] first10=[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]%n",
+                                  routerMin, routerMax, routerData[0], routerData[1], routerData[2], routerData[3], routerData[4],
+                                  routerData[5], routerData[6], routerData[7], routerData[8], routerData[9]);
+
                 // Step 2: Select top-k experts
+                System.err.printf("[MOE-DEBUG] Step 2: Selecting top-%d experts...%n", topK);
                 selectTopKExperts(routerData, selectedExperts, expertWeightValues);
+
+                // DEBUG: Selected experts analysis
+                System.err.printf("[MOE-DEBUG] SELECTED_EXPERTS: [%d,%d,%d,%d,%d,%d,%d,%d]%n",
+                                  selectedExperts[0], selectedExperts[1], selectedExperts[2], selectedExperts[3],
+                                  selectedExperts[4], selectedExperts[5], selectedExperts[6], selectedExperts[7]);
+                System.err.printf("[MOE-DEBUG] EXPERT_WEIGHTS: [%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                                  expertWeightValues[0], expertWeightValues[1], expertWeightValues[2], expertWeightValues[3],
+                                  expertWeightValues[4], expertWeightValues[5], expertWeightValues[6], expertWeightValues[7]);
 
                 // ⚡ CRITICAL DIAGNOSTIC: Router logits analysis (moved here where routerData is available)
                 float maxLogit = routerData[0], minLogit = routerData[0];
@@ -1104,24 +1170,39 @@ public class OLMoEGPUProcessor {
      * Apply RMS normalization on GPU
      */
     private void applyRMSNormGPU(FloatArray input, FloatArray weights, float eps, int size) {
-        // DEBUG: Check input values before normalization
+        // ENHANCED DEBUG: Check input values before normalization
         float inputSum = 0.0f;
+        float inputMin = input.get(0), inputMax = input.get(0);
         for (int i = 0; i < Math.min(5, size); i++) {
-            inputSum += Math.abs(input.get(i));
+            float val = input.get(i);
+            inputSum += Math.abs(val);
+            if (i < size) {
+                if (val < inputMin) inputMin = val;
+                if (val > inputMax) inputMax = val;
+            }
         }
-        System.err.printf("[RMS-DEBUG] Before norm - input sum (first 5): %.6f%n", inputSum);
+        System.err.printf("[RMS-DEBUG] BEFORE: eps=%.8f, size=%d%n", eps, size);
+        System.err.printf("[RMS-DEBUG] BEFORE: inputSum(abs,first5)=%.6f, range=[%.6f,%.6f]%n", inputSum, inputMin, inputMax);
+        System.err.printf("[RMS-DEBUG] BEFORE: first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          input.get(0), input.get(1), input.get(2), input.get(3), input.get(4));
 
-        // TEMPORARY FIX: Use CPU implementation for debugging
-        // Compute RMS
+        // Check normalization weights
+        System.err.printf("[RMS-DEBUG] WEIGHTS: first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          weights.get(0), weights.get(1), weights.get(2), weights.get(3), weights.get(4));
+
+        // ENHANCED DEBUG: Step-by-step RMS computation
         float sumSquares = 0.0f;
         for (int i = 0; i < size; i++) {
             float val = input.get(i);
             sumSquares += val * val;
         }
-        float rms = (float) Math.sqrt(sumSquares / size + eps);
+        float meanSquare = sumSquares / size;
+        float variance = meanSquare + eps;
+        float rms = (float) Math.sqrt(variance);
         float scale = 1.0f / rms;
 
-        System.err.printf("[RMS-DEBUG] sumSquares=%.6f, rms=%.6f, scale=%.6f%n", sumSquares, rms, scale);
+        System.err.printf("[RMS-DEBUG] COMPUTE: sumSquares=%.6f, meanSquare=%.6f, variance=%.6f%n", sumSquares, meanSquare, variance);
+        System.err.printf("[RMS-DEBUG] COMPUTE: rms=%.6f, scale=%.6f%n", rms, scale);
 
         // Apply normalization (RMS norm only, NO weight multiplication here)
         for (int i = 0; i < size; i++) {
@@ -1133,12 +1214,28 @@ public class OLMoEGPUProcessor {
             input.set(i, input.get(i) * weights.get(i));
         }
 
-        // DEBUG: Check output values after normalization
+        // ENHANCED DEBUG: Check output values after normalization
         float outputSum = 0.0f;
-        for (int i = 0; i < Math.min(5, size); i++) {
-            outputSum += Math.abs(input.get(i));
+        float outputMin = input.get(0), outputMax = input.get(0);
+        for (int i = 0; i < Math.min(100, size); i++) {
+            float val = input.get(i);
+            outputSum += Math.abs(val);
+            if (val < outputMin) outputMin = val;
+            if (val > outputMax) outputMax = val;
         }
-        System.err.printf("[RMS-DEBUG] After norm - output sum (first 5): %.6f%n", outputSum);
+        System.err.printf("[RMS-DEBUG] AFTER: outputSum(abs,first100)=%.6f, range=[%.6f,%.6f]%n", outputSum, outputMin, outputMax);
+        System.err.printf("[RMS-DEBUG] AFTER: first5=[%.6f,%.6f,%.6f,%.6f,%.6f]%n",
+                          input.get(0), input.get(1), input.get(2), input.get(3), input.get(4));
+
+        // CRITICAL: Compare with expected llama.cpp reference values for first token
+        if (Math.abs(input.get(0) - 0.453979f) > 0.01f || Math.abs(input.get(1) - (-0.843513f)) > 0.01f) {
+            System.err.printf("[RMS-DEBUG] ❌ DIVERGENCE DETECTED!%n");
+            System.err.printf("[RMS-DEBUG] Expected: [0.453979, -0.843513, -0.390691, 3.344672, -1.905388]%n");
+            System.err.printf("[RMS-DEBUG] Actual  : [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                              input.get(0), input.get(1), input.get(2), input.get(3), input.get(4));
+        } else {
+            System.err.printf("[RMS-DEBUG] ✅ Values match llama.cpp reference!%n");
+        }
     }
 
     /**
@@ -1502,7 +1599,7 @@ public class OLMoEGPUProcessor {
      */
     public void processTransformerLayer(int layer, int position, int token,
                                       OlmoeState state, OlmoeTornadoWeights weights, OlmoeConfiguration config) {
-        System.out.printf("[TRANSFORM-LAYER-DEBUG] Layer %d called with position %d, token %d%n", layer, position, token);
+        System.err.printf("[EXECUTION-PATH-DEBUG] 🚀 OLMoEGPUProcessor.processTransformerLayer LAYER %d called with position %d, token %d%n", layer, position, token);
         logger.fine(String.format("[OLMOE-GPU] Processing transformer layer %d (position %d) with strategy %s",
                                  layer, position, memoryManager.getStrategy()));
 

@@ -2173,7 +2173,8 @@ public final class InferenceCore {
      * @return FloatTensor containing the output logits for token prediction
      */
     public static FloatArray forwardTornadoVM(Model model, State state, int token, int position, TornadoVMMasterPlan tornadoVMMasterPlan) {
-
+        System.err.printf("[EXECUTION-PATH-DEBUG] ❌ GENERIC forwardTornadoVM called! Model=%s, token=%d, pos=%d%n",
+                         model.getClass().getSimpleName(), token, position);
 
         final Configuration configuration = model.configuration();
         final TornadoWeights weights = (TornadoWeights) model.weights();
@@ -2224,7 +2225,7 @@ public final class InferenceCore {
      * @return FloatArray containing the output logits for token prediction
      */
     public static FloatArray forwardTornadoVMOlmoe(Model model, OlmoeState state, int token, int position, TornadoVMMasterPlan tornadoVMPlan) {
-        System.err.printf("[FORWARDTORNADO-OLMOE-DEBUG] Called with token=%d, position=%d%n", token, position);
+        System.err.printf("[EXECUTION-PATH-DEBUG] ✅ forwardTornadoVMOlmoe CALLED with token=%d, position=%d%n", token, position);
         var config = (org.beehive.gpullama3.model.olmoe.OlmoeConfiguration) model.configuration();
         var olmoeWeights = (org.beehive.gpullama3.inference.weights.olmoe.OlmoeTornadoWeights) model.weights();
 
@@ -2273,12 +2274,23 @@ public final class InferenceCore {
         tornadoVMPlan.executionPlan.withGraph(0).withGridScheduler(tornadoVMPlan.scheduler).execute();
 
         // Process all transformer layers using optimized OLMoE GPU processor
+        System.err.printf("[EXECUTION-PATH-DEBUG] 🔄 Creating OLMoEGPUProcessor%n");
         org.beehive.gpullama3.tornadovm.OLMoEGPUProcessor processor =
             new org.beehive.gpullama3.tornadovm.OLMoEGPUProcessor();
+        System.err.printf("[EXECUTION-PATH-DEBUG] 🔄 Initializing OLMoEGPUProcessor%n");
         processor.initialize((OlmoeState) state, config);
+        System.err.printf("[EXECUTION-PATH-DEBUG] ✅ OLMoEGPUProcessor initialized successfully%n");
 
         for (int layer = 0; layer < config.numberOfLayers(); layer++) {
-            processor.processTransformerLayer(layer, position, token, state, olmoeWeights, config);
+            System.err.printf("[EXECUTION-PATH-DEBUG] ✅ Processing layer %d/%d (token=%d, pos=%d)%n", layer, config.numberOfLayers()-1, token, position);
+            try {
+                processor.processTransformerLayer(layer, position, token, state, olmoeWeights, config);
+                System.err.printf("[EXECUTION-PATH-DEBUG] ✅ Completed layer %d processing%n", layer);
+            } catch (Exception e) {
+                System.err.printf("[EXECUTION-PATH-DEBUG] ❌ EXCEPTION in layer %d: %s%n", layer, e.getMessage());
+                e.printStackTrace();
+                throw e;
+            }
         }
 
         processor.processFinalization(state, olmoeWeights, config);
