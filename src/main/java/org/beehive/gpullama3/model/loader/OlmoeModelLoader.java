@@ -1017,6 +1017,47 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
         }
         System.err.println();
 
+        // CRITICAL DEBUG: Check specific tokens we know from llama.cpp
+        int[] criticalTokens = {38878, 479, 247, 2926}; // "tell", " me", " a", " story"
+        String[] tokenNames = {"tell", " me", " a", " story"};
+
+        for (int i = 0; i < criticalTokens.length; i++) {
+            int token = criticalTokens[i];
+            if (token < n_vocab) {
+                System.err.printf("[TRANSPOSE-DEBUG] Token %d ('%s') after transpose (first 10): ",
+                    token, tokenNames[i]);
+                for (int d = 0; d < Math.min(10, n_embd); d++) {
+                    System.err.printf("%.6f ", array.get(token * n_embd + d));
+                }
+                System.err.println();
+
+                // Calculate RMS for this token's embedding
+                float sumSquares = 0;
+                for (int d = 0; d < n_embd; d++) {
+                    float val = array.get(token * n_embd + d);
+                    sumSquares += val * val;
+                }
+                float rms = (float)Math.sqrt(sumSquares / n_embd);
+                System.err.printf("[TRANSPOSE-DEBUG]   Token %d RMS: %.6f%n", token, rms);
+            }
+        }
+
+        // BEFORE/AFTER comparison for token 38878 ("tell")
+        if (38878 < n_vocab) {
+            System.err.println("[TRANSPOSE-COMPARE] Token 38878 ('tell') - BEFORE vs AFTER transpose:");
+            System.err.printf("[TRANSPOSE-COMPARE]   BEFORE (raw GGML): ");
+            for (int d = 0; d < Math.min(5, n_embd); d++) {
+                int sourceIndex = d * n_vocab + 38878;
+                System.err.printf("%.6f ", tensor.getFloat(sourceIndex));
+            }
+            System.err.println();
+            System.err.printf("[TRANSPOSE-COMPARE]   AFTER (transposed): ");
+            for (int d = 0; d < Math.min(5, n_embd); d++) {
+                System.err.printf("%.6f ", array.get(38878 * n_embd + d));
+            }
+            System.err.println();
+        }
+
         return array;
     }
 

@@ -1623,6 +1623,22 @@ public class OLMoEGPUProcessor {
                          layer, minInput, maxInput,
                          layerInput.get(0), layerInput.get(1), layerInput.get(2), layerInput.get(3), layerInput.get(4));
 
+        // CRITICAL DEBUG: Compare layer 0 input with expected llama.cpp values
+        if (layer == 0 && position == 0 && token == 38878) { // First token "tell"
+            System.err.println("[LAYER-0-CRITICAL] *** FIRST TOKEN EMBEDDING COMPARISON ***");
+            System.err.printf("[LAYER-0-CRITICAL]   Java:      [%.6f, %.6f, %.6f, %.6f, %.6f]%n",
+                layerInput.get(0), layerInput.get(1), layerInput.get(2), layerInput.get(3), layerInput.get(4));
+            System.err.println("[LAYER-0-CRITICAL]   llama.cpp: [NEED_VALUES_FROM_LLAMA_CPP]");
+
+            // Calculate and display magnitude
+            float sumSquares = 0;
+            for (int i = 0; i < Math.min(100, layerInput.getSize()); i++) {
+                sumSquares += layerInput.get(i) * layerInput.get(i);
+            }
+            float rms = (float)Math.sqrt(sumSquares / 100);
+            System.err.printf("[LAYER-0-CRITICAL]   Java RMS (first 100): %.6f%n", rms);
+        }
+
         // Save residual connection input
         for (int i = 0; i < layerInput.getSize(); i++) {
             residualInput.set(i, layerInput.get(i));
