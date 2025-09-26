@@ -771,8 +771,11 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             FloatTensor attnNormTensor = loadedTensors.get("blk." + i + ".attn_norm.weight");
             attentionNorms[i] = convertToFloatArray(attnNormTensor);
 
-            // CRITICAL DEBUG: Check layer attention norm values
+            // CRITICAL DEBUG: Check tensor data type and values for root cause analysis
             if (i == 0 && attentionNorms[i] != null) {
+                // CRITICAL: Show tensor type information - this will help identify F16 vs F32 conversion issue
+                System.err.printf("[TYPE-DEBUG] Layer %d attn_norm tensor class: %s%n", i, attnNormTensor.getClass().getSimpleName());
+
                 System.err.printf("[LAYER-NORM-DEBUG] Layer %d attn_norm tensor size: %d%n", i, attnNormTensor.size());
                 System.err.printf("[LAYER-NORM-DEBUG] Layer %d attn_norm first 10 values: ", i);
                 for (int j = 0; j < Math.min(10, attentionNorms[i].getSize()); j++) {
@@ -801,8 +804,11 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
             FloatTensor ffnNormTensor = loadedTensors.get("blk." + i + ".ffn_norm.weight");
             ffnNorms[i] = convertToFloatArray(ffnNormTensor);
 
-            // CRITICAL DEBUG: Check layer FFN norm values
+            // CRITICAL DEBUG: Check tensor data type and values for comparison with attn_norm
             if (i == 0 && ffnNorms[i] != null) {
+                // CRITICAL: Show tensor type information - compare with attn_norm
+                System.err.printf("[TYPE-DEBUG] Layer %d ffn_norm tensor class: %s%n", i, ffnNormTensor.getClass().getSimpleName());
+
                 System.err.printf("[FFN-NORM-DEBUG] Layer %d ffn_norm tensor size: %d%n", i, ffnNormTensor.size());
                 System.err.printf("[FFN-NORM-DEBUG] Layer %d ffn_norm first 10 values: ", i);
                 for (int j = 0; j < Math.min(10, ffnNorms[i].getSize()); j++) {
@@ -949,7 +955,7 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
         System.err.println("[WEIGHT-VERIFY] ===================================================================");
 
         return new OlmoeTornadoWeights(
-                convertToFloatArray(tokenEmbeddings),  // tokenEmbeddingTable
+                convertTokenEmbeddings(tokenEmbeddings, config.dim(), config.vocabularySize()),  // tokenEmbeddingTable
                 attentionNorms,                        // rms_att_weightLayered
                 queryWeights,                          // wqLayered
                 keyWeights,                            // wkLayered
@@ -974,6 +980,44 @@ public class OlmoeModelLoader extends BatchCapableModelLoader {
                 sourceExpertDownWeights,               // NEW: Source tensors for selective loading
                 sourceExpertUpWeights                  // NEW: Source tensors for selective loading
         );
+    }
+
+    /**
+     * Converts token embeddings from GGML column-major to row-major layout
+     * GGML stores as [n_embd, n_vocab] but we need [n_vocab, n_embd]
+     */
+    private FloatArray convertTokenEmbeddings(org.beehive.gpullama3.core.model.tensor.FloatTensor tensor,
+                                            int n_embd, int n_vocab) {
+        if (tensor == null) return null;
+
+        System.err.printf("[TRANSPOSE-FIX] Converting token embeddings from [%d, %d] GGML layout%n", n_embd, n_vocab);
+
+        FloatArray array = new FloatArray(n_embd * n_vocab);
+
+        // Transpose from column-major GGML [n_embd, n_vocab] to row-major [n_vocab, n_embd]
+        for (int token = 0; token < n_vocab; token++) {
+            for (int dim = 0; dim < n_embd; dim++) {
+                // GGML column-major: data is stored as dim0_all_tokens, dim1_all_tokens, ...
+                // Source index: dim * n_vocab + token
+                int sourceIndex = dim * n_vocab + token;
+
+                // Target row-major: token0_all_dims, token1_all_dims, ...
+                // Target index: token * n_embd + dim
+                int targetIndex = token * n_embd + dim;
+
+                float value = tensor.getFloat(sourceIndex);
+                array.set(targetIndex, value);
+            }
+        }
+
+        // Debug: Check first token's embedding after transpose
+        System.err.printf("[TRANSPOSE-FIX] Token 0 embedding after transpose (first 5 dims): ");
+        for (int i = 0; i < Math.min(5, n_embd); i++) {
+            System.err.printf("%.6f ", array.get(i));
+        }
+        System.err.println();
+
+        return array;
     }
 
     /**
